@@ -11,6 +11,8 @@
 
 use soroban_sdk::{contracttype, Address, Env};
 
+use crate::Schedule;
+
 /// Ledgers per day. Stellar closes a ledger roughly every 5 seconds
 /// (measured on 2026-10-27 over 100 consecutive ledgers on both testnet and
 /// mainnet via Horizon `/ledgers`: 500 s per 100 ledgers), so
@@ -45,8 +47,12 @@ pub enum DataKey {
     Paused,
     /// Sum of all employer escrows (instance).
     TotalEscrow,
+    /// Next schedule id to assign; ids start at 1 (instance).
+    NextScheduleId,
     /// An employer's escrow balance (persistent).
     Escrow(Address),
+    /// A schedule by id (persistent).
+    Schedule(u64),
 }
 
 /// Extend the TTL of the contract instance and code.
@@ -171,4 +177,29 @@ pub fn get_escrow(env: &Env, employer: &Address) -> i128 {
 
 pub fn set_escrow(env: &Env, employer: &Address, balance: i128) {
     set_persistent(env, &DataKey::Escrow(employer.clone()), &balance);
+}
+
+// ---- instance counters -----------------------------------------------------
+
+/// Allocate the next schedule id (starting at 1).
+pub fn next_schedule_id(env: &Env) -> u64 {
+    let id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextScheduleId)
+        .unwrap_or(1);
+    env.storage()
+        .instance()
+        .set(&DataKey::NextScheduleId, &(id + 1));
+    id
+}
+
+// ---- persistent: schedules -------------------------------------------------
+
+pub fn get_schedule(env: &Env, id: u64) -> Option<Schedule> {
+    get_persistent(env, &DataKey::Schedule(id))
+}
+
+pub fn set_schedule(env: &Env, schedule: &Schedule) {
+    set_persistent(env, &DataKey::Schedule(schedule.id), schedule);
 }

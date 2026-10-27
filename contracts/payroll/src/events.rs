@@ -25,6 +25,52 @@ pub struct EscrowWithdrawn {
     pub amount: i128,
 }
 
+/// `schedule_created`: `employer` created schedule `schedule_id` paying
+/// `amount` to `recipient` every `period` seconds, first at `next_due`.
+///
+/// The label is deliberately not part of the event: a transaction may
+/// emit at most 16 KiB of contract events, and `create_schedules` emits one
+/// event per schedule for up to 50 schedules. Read it with `get_schedule`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleCreated {
+    #[topic]
+    pub employer: Address,
+    pub schedule_id: u64,
+    pub recipient: Address,
+    pub amount: i128,
+    pub period: u64,
+    pub next_due: u64,
+}
+
+/// `disbursed`: one period of schedule `schedule_id` was paid: `employer`'s
+/// escrow was debited `amount`, `recipient` received `amount - fee` and the
+/// fee recipient `fee`. The next period is due at `next_due`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Disbursed {
+    #[topic]
+    pub employer: Address,
+    pub schedule_id: u64,
+    pub recipient: Address,
+    pub amount: i128,
+    pub fee: i128,
+    pub next_due: u64,
+}
+
+/// `disburse_failed`: schedule `schedule_id` was due but `employer`'s
+/// escrow (`escrow`) is smaller than `amount`. Nothing changed; the period
+/// stays owed.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisburseFailed {
+    #[topic]
+    pub employer: Address,
+    pub schedule_id: u64,
+    pub amount: i128,
+    pub escrow: i128,
+}
+
 /// `fee_set`: the admin changed the fee to `fee_bps` basis points.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

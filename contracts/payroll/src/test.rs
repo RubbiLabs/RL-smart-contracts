@@ -10,10 +10,13 @@ use soroban_sdk::{
     },
     token::{StellarAssetClient, TokenClient},
     xdr::ScErrorType,
-    Address, ConversionError, Env, Event as _, IntoVal, InvokeError, Symbol,
+    Address, ConversionError, Env, Event as _, IntoVal, InvokeError, String, Symbol,
 };
 
-use crate::{events, Error, PayrollContract, PayrollContractClient};
+use crate::{
+    events, Error, PayrollContract, PayrollContractClient, Schedule, ScheduleInput, ScheduleStatus,
+    MAX_BATCH, MAX_LABEL_LEN, MAX_PERIOD, MAX_SCHEDULES_PER_CALL, MIN_PERIOD,
+};
 
 /// Default fee used by the tests: 50 bps = 0.5%.
 const FEE_BPS: u32 = 50;
@@ -21,6 +24,8 @@ const FEE_BPS: u32 = 50;
 const USDC: i128 = 10_000_000;
 /// Ledger timestamp at which every test starts (2023-11-14T22:13:20Z).
 const START: u64 = 1_700_000_000;
+/// A 30-day schedule period, in seconds.
+const MONTH: u64 = 30 * 86_400;
 
 /// Everything a test needs: the env, the roles, the token and the contract.
 struct Setup {
@@ -117,6 +122,57 @@ fn expected_auth(
 /// Events emitted by the contract during the last invocation.
 fn last_events(s: &Setup) -> soroban_sdk::testutils::ContractEvents {
     s.env.events().all().filter_by_contract(&s.contract)
+}
+
+/// Move the ledger clock forward by `secs` seconds (and a proportional
+/// number of ledgers at 5 s each).
+fn advance(s: &Setup, secs: u64) {
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += secs;
+        li.sequence_number += (secs / 5) as u32;
+    });
+}
+
+fn now(s: &Setup) -> u64 {
+    s.env.ledger().timestamp()
+}
+
+fn label(s: &Setup, text: &str) -> String {
+    String::from_str(&s.env, text)
+}
+
+fn input(s: &Setup, recipient: &Address, amount: i128, period: u64, text: &str) -> ScheduleInput {
+    ScheduleInput {
+        recipient: recipient.clone(),
+        amount,
+        period,
+        label: label(s, text),
+    }
+}
+
+/// An employer with `escrow` already funded and one monthly schedule of
+/// `amount` to a fresh recipient, first due now. Returns
+/// (employer, recipient, schedule id).
+fn funded_schedule(s: &Setup, escrow: i128, amount: i128) -> (Address, Address, u64) {
+    let boss = employer(s, escrow);
+    if escrow > 0 {
+        s.client.fund(&boss, &escrow);
+    }
+    let staff = Address::generate(&s.env);
+    let ids = s.client.create_schedules(
+        &boss,
+        &soroban_sdk::vec![&s.env, input(s, &staff, amount, MONTH, "Design lead")],
+        &now(s),
+    );
+    (boss, staff, ids.get(0).unwrap())
+}
+
+fn status_of(s: &Setup, id: u64) -> ScheduleStatus {
+    s.client.get_schedule(&id).status
+}
+
+fn next_due_of(s: &Setup, id: u64) -> u64 {
+    s.client.get_schedule(&id).next_due
 }
 
 /// A fresh employer wallet holding `balance` tokens (all auths mocked).
@@ -398,4 +454,476 @@ fn admin_two_step_transfer() {
     s.client.pause();
     s.env.mock_all_auths();
     assert!(s.client.is_paused());
+}
+
+// ---- create_schedules --------------------------------------------------------------
+
+#[test]
+fn create_schedules_requires_exact_employer_auth_and_stores_every_schedule() {
+    let s = setup();
+    let boss = employer(&s, 0);
+    let a = Address::generate(&s.env);
+    let b = Address::generate(&s.env);
+    let first_due = now(&s) + 7 * 86_400;
+    let inputs = soroban_sdk::vec![
+        &s.env,
+        input(&s, &a, 100 * USDC, MONTH, "Design lead"),
+        input(&s, &b, 50 * USDC, 2 * 86_400, ""),
+    ];
+
+    let ids = s.client.create_schedules(&boss, &inputs, &first_due);
+    assert_eq!(ids, soroban_sdk::vec![&s.env, 1, 2]);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &boss,
+            "create_schedules",
+            (boss.clone(), inputs.clone(), first_due).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [
+            events::ScheduleCreated {
+                employer: boss.clone(),
+                schedule_id: 1,
+                recipient: a.clone(),
+                amount: 100 * USDC,
+                period: MONTH,
+                next_due: first_due,
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::ScheduleCreated {
+                employer: boss.clone(),
+                schedule_id: 2,
+                recipient: b.clone(),
+                amount: 50 * USDC,
+                period: 2 * 86_400,
+                next_due: first_due,
+            }
+            .to_xdr(&s.env, &s.contract),
+        ]
+    );
+    // L10: every schedule is stored and retrievable by its id.
+    assert_eq!(
+        s.client.get_schedule(&1),
+        Schedule {
+            id: 1,
+            employer: boss.clone(),
+            recipient: a.clone(),
+            amount: 100 * USDC,
+            period: MONTH,
+            next_due: first_due,
+            status: ScheduleStatus::Active,
+            label: label(&s, "Design lead"),
+            created_at: START,
+        }
+    );
+    assert_eq!(
+        s.client.get_schedule(&2),
+        Schedule {
+            id: 2,
+            employer: boss.clone(),
+            recipient: b.clone(),
+            amount: 50 * USDC,
+            period: 2 * 86_400,
+            next_due: first_due,
+            status: ScheduleStatus::Active,
+            label: label(&s, ""),
+            created_at: START,
+        }
+    );
+    assert_eq!(
+        s.client.try_get_schedule(&3),
+        Err(Ok(Error::ScheduleNotFound))
+    );
+
+    // Ids are global across employers; an empty input list creates nothing.
+    let other = employer(&s, 0);
+    assert_eq!(
+        s.client.create_schedules(
+            &other,
+            &soroban_sdk::vec![&s.env, input(&s, &a, USDC, MONTH, "x")],
+            &first_due
+        ),
+        soroban_sdk::vec![&s.env, 3]
+    );
+    assert_eq!(
+        s.client
+            .create_schedules(&other, &soroban_sdk::Vec::new(&s.env), &first_due),
+        soroban_sdk::Vec::new(&s.env)
+    );
+    assert_eq!(s.client.get_schedule(&3).employer, other);
+}
+
+#[test]
+fn create_schedules_by_another_signer_fails() {
+    let s = setup();
+    let boss = employer(&s, 0);
+    let staff = Address::generate(&s.env);
+    let inputs = soroban_sdk::vec![&s.env, input(&s, &staff, USDC, MONTH, "x")];
+    let first_due = now(&s);
+
+    for signer in [&s.admin, &staff, &Address::generate(&s.env)] {
+        mock_auth_for(
+            &s,
+            signer,
+            "create_schedules",
+            (boss.clone(), inputs.clone(), first_due).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_create_schedules(&boss, &inputs, &first_due),
+            Err(Err(_))
+        ));
+    }
+    s.env.mock_all_auths();
+    assert_eq!(
+        s.client.try_get_schedule(&1),
+        Err(Ok(Error::ScheduleNotFound))
+    );
+}
+
+#[test]
+fn create_schedules_is_atomic_on_invalid_input() {
+    let s = setup();
+    let boss = employer(&s, 0);
+    let staff = Address::generate(&s.env);
+    let ok = input(&s, &staff, USDC, MONTH, &"l".repeat(MAX_LABEL_LEN as usize));
+    let first_due = now(&s);
+
+    let bad_inputs = [
+        (input(&s, &staff, 0, MONTH, "zero"), Error::InvalidAmount),
+        (
+            input(&s, &staff, -1, MONTH, "negative"),
+            Error::InvalidAmount,
+        ),
+        (
+            input(&s, &staff, USDC, MIN_PERIOD - 1, "short"),
+            Error::InvalidPeriod,
+        ),
+        (
+            input(&s, &staff, USDC, MAX_PERIOD + 1, "long"),
+            Error::InvalidPeriod,
+        ),
+        (
+            input(&s, &staff, USDC, 0, "zero period"),
+            Error::InvalidPeriod,
+        ),
+        (
+            input(
+                &s,
+                &staff,
+                USDC,
+                MONTH,
+                &"l".repeat(MAX_LABEL_LEN as usize + 1),
+            ),
+            Error::LabelTooLong,
+        ),
+    ];
+    for (bad, err) in bad_inputs {
+        // Valid inputs before and after the bad one: none is created.
+        let inputs = soroban_sdk::vec![&s.env, ok.clone(), ok.clone(), bad, ok.clone()];
+        assert_eq!(
+            s.client.try_create_schedules(&boss, &inputs, &first_due),
+            Err(Ok(err))
+        );
+        assert_eq!(
+            s.client.try_get_schedule(&1),
+            Err(Ok(Error::ScheduleNotFound))
+        );
+    }
+
+    // first_due in the past, too many inputs, paused.
+    assert_eq!(
+        s.client.try_create_schedules(
+            &boss,
+            &soroban_sdk::vec![&s.env, ok.clone()],
+            &(first_due - 1)
+        ),
+        Err(Ok(Error::FirstDueInPast))
+    );
+    let mut too_many = soroban_sdk::Vec::new(&s.env);
+    for _ in 0..=MAX_SCHEDULES_PER_CALL {
+        too_many.push_back(ok.clone());
+    }
+    assert_eq!(
+        s.client.try_create_schedules(&boss, &too_many, &first_due),
+        Err(Ok(Error::TooManySchedules))
+    );
+    s.client.pause();
+    assert_eq!(
+        s.client
+            .try_create_schedules(&boss, &soroban_sdk::vec![&s.env, ok.clone()], &first_due),
+        Err(Ok(Error::Paused))
+    );
+    s.client.unpause();
+    assert_eq!(
+        s.client.try_get_schedule(&1),
+        Err(Ok(Error::ScheduleNotFound))
+    );
+
+    // Exactly the maximum is fine, and the rejected calls consumed no ids.
+    too_many.pop_back();
+    let ids = s.client.create_schedules(&boss, &too_many, &first_due);
+    // The host enforces the network's per-transaction limits in tests, so
+    // this call also proves that 50 schedules (with maximum-length labels)
+    // fit in one transaction: 50 `schedule_created` events use ~15.6 KiB of
+    // the 16 KiB contract-events budget.
+    assert_eq!(ids.len(), MAX_SCHEDULES_PER_CALL);
+    assert_eq!(ids.get(0), Some(1));
+    assert_eq!(ids.last(), Some(u64::from(MAX_SCHEDULES_PER_CALL)));
+}
+
+// ---- disburse: time gate (L3) and back pay -------------------------------------------
+
+#[test]
+fn disburse_before_due_fails_and_after_due_pays_exactly_one_period() {
+    let s = setup();
+    let boss = employer(&s, 1_000 * USDC);
+    s.client.fund(&boss, &(1_000 * USDC));
+    let staff = Address::generate(&s.env);
+    let first_due = now(&s) + 86_400;
+    let id = s
+        .client
+        .create_schedules(
+            &boss,
+            &soroban_sdk::vec![&s.env, input(&s, &staff, 100 * USDC, MONTH, "Dev")],
+            &first_due,
+        )
+        .get(0)
+        .unwrap();
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+
+    // L3: not due yet, even one second before.
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotDue)));
+    advance(&s, 86_400 - 1);
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotDue)));
+    assert_eq!(s.token.balance(&staff), 0);
+
+    // Due: exactly one period is paid and next_due moves by one period.
+    advance(&s, 1);
+    assert!(s.client.disburse(&id));
+    assert_eq!(status_of(&s, id), ScheduleStatus::Active);
+    assert_eq!(s.token.balance(&staff), 100 * USDC - fee);
+    assert_eq!(s.token.balance(&s.fee_recipient), fee);
+    assert_eq!(s.client.escrow_of(&boss), 900 * USDC);
+    assert_eq!(s.client.total_escrow(), 900 * USDC);
+    assert_eq!(s.token.balance(&s.contract), 900 * USDC);
+    assert_eq!(next_due_of(&s, id), first_due + MONTH);
+    // L3: the state was updated, so calling again is rejected.
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotDue)));
+    assert_eq!(s.token.balance(&staff), 100 * USDC - fee);
+
+    // `disburse` is permissionless: no authorization is required at all.
+    advance(&s, MONTH);
+    s.env.mock_auths(&[]);
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.env.auths(), std::vec![]);
+    assert_eq!(s.token.balance(&staff), 2 * (100 * USDC - fee));
+
+    assert_eq!(s.client.try_disburse(&99), Err(Ok(Error::ScheduleNotFound)));
+}
+
+#[test]
+fn back_pay_rule_n_missed_periods_produce_exactly_n_payments() {
+    let s = setup();
+    let (boss, staff, id) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+
+    // The keeper was down for 4 periods (first due was at START).
+    advance(&s, 4 * MONTH - 1);
+    assert_eq!(next_due_of(&s, id), START);
+    for n in 1..=4_u64 {
+        assert!(s.client.disburse(&id), "payment {n}");
+        assert_eq!(s.token.balance(&staff), n as i128 * (100 * USDC - fee));
+        assert_eq!(next_due_of(&s, id), START + n * MONTH);
+    }
+    // The 5th call fails: the 5th period is not due for another second.
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotDue)));
+    assert_eq!(s.token.balance(&staff), 4 * (100 * USDC - fee));
+    assert_eq!(s.client.escrow_of(&boss), 600 * USDC);
+    assert_eq!(s.token.balance(&s.fee_recipient), 4 * fee);
+
+    advance(&s, 1);
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotDue)));
+    // A batch catches up the same way: one period per item per call.
+    advance(&s, 2 * MONTH);
+    assert_eq!(
+        s.client
+            .disburse_batch(&soroban_sdk::vec![&s.env, id, id, id]),
+        soroban_sdk::vec![&s.env, true, true, false]
+    );
+    assert_eq!(s.token.balance(&staff), 7 * (100 * USDC - fee));
+}
+
+#[test]
+fn insufficient_escrow_returns_false_and_changes_nothing() {
+    let s = setup();
+    let (boss, staff, id) = funded_schedule(&s, 150 * USDC, 100 * USDC);
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+
+    // First period: fine. Second: 50 USDC left, 100 needed.
+    assert!(s.client.disburse(&id));
+    advance(&s, MONTH);
+    assert!(!s.client.disburse(&id));
+    assert_eq!(
+        last_events(&s),
+        [events::DisburseFailed {
+            employer: boss.clone(),
+            schedule_id: id,
+            amount: 100 * USDC,
+            escrow: 50 * USDC,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    let schedule = s.client.get_schedule(&id);
+    assert_eq!(schedule.status, ScheduleStatus::Active);
+    assert_eq!(schedule.next_due, START + MONTH, "the period stays owed");
+    assert_eq!(s.client.escrow_of(&boss), 50 * USDC);
+    assert_eq!(s.client.total_escrow(), 50 * USDC);
+    assert_eq!(s.token.balance(&staff), 100 * USDC - fee);
+    assert_eq!(s.token.balance(&s.fee_recipient), fee);
+    assert_eq!(s.token.balance(&s.contract), 50 * USDC);
+
+    // Retrying without funding fails the same way, idempotently.
+    assert!(!s.client.disburse(&id));
+    assert_eq!(next_due_of(&s, id), START + MONTH);
+
+    // Funding the escrow lets the owed period be paid.
+    s.token_admin.mint(&boss, &(50 * USDC));
+    s.client.fund(&boss, &(50 * USDC));
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.client.escrow_of(&boss), 0);
+    assert_eq!(s.token.balance(&staff), 2 * (100 * USDC - fee));
+    assert_eq!(next_due_of(&s, id), START + 2 * MONTH);
+
+    // An employer with no escrow at all: same outcome.
+    let (_, _, unfunded) = funded_schedule(&s, 0, USDC);
+    assert!(!s.client.disburse(&unfunded));
+}
+
+#[test]
+fn fee_split_is_exact_including_rounding() {
+    let s = setup();
+    // 50 bps of 1.2345679 USDC = 61_728.395 stroops → 61_728 (rounded down).
+    let amount = 12_345_679_i128;
+    let (boss, staff, id) = funded_schedule(&s, 10 * USDC, amount);
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.token.balance(&s.fee_recipient), 61_728);
+    assert_eq!(s.token.balance(&staff), amount - 61_728);
+    assert_eq!(s.client.escrow_of(&boss), 10 * USDC - amount);
+    assert_eq!(s.token.balance(&s.contract), 10 * USDC - amount);
+
+    // Too small to produce a fee: the recipient gets everything.
+    let (_, tiny_staff, tiny) = funded_schedule(&s, USDC, 199);
+    assert!(s.client.disburse(&tiny));
+    assert_eq!(s.token.balance(&tiny_staff), 199);
+    assert_eq!(s.token.balance(&s.fee_recipient), 61_728);
+
+    // Fee changes apply to the next disbursement; the cap is honoured.
+    s.client.set_fee(&crate::MAX_FEE_BPS);
+    advance(&s, MONTH);
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.token.balance(&s.fee_recipient), 61_728 + 1_234_567);
+    assert_eq!(s.token.balance(&staff), 2 * amount - 61_728 - 1_234_567);
+
+    // Zero fee: nothing goes to the fee recipient.
+    s.client.set_fee(&0);
+    advance(&s, MONTH);
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.token.balance(&s.fee_recipient), 61_728 + 1_234_567);
+    assert_eq!(s.token.balance(&staff), 3 * amount - 61_728 - 1_234_567);
+    // Escrow invariant: contract balance == total escrow.
+    assert_eq!(s.token.balance(&s.contract), s.client.total_escrow());
+}
+
+// ---- disburse_batch ------------------------------------------------------------------
+
+#[test]
+fn disburse_batch_enforces_the_limit_and_the_pause() {
+    let s = setup();
+    let (_boss, staff, id) = funded_schedule(&s, 1_000 * USDC, USDC);
+
+    let mut too_many = soroban_sdk::Vec::new(&s.env);
+    for _ in 0..=MAX_BATCH {
+        too_many.push_back(id);
+    }
+    assert_eq!(
+        s.client.try_disburse_batch(&too_many),
+        Err(Ok(Error::BatchTooLarge))
+    );
+    assert_eq!(s.token.balance(&staff), 0);
+
+    // Exactly MAX_BATCH ids is fine; the repeated id is paid once (the
+    // schedule is due once) and then reported as not due.
+    too_many.pop_back();
+    let results = s.client.disburse_batch(&too_many);
+    assert_eq!(results.len(), MAX_BATCH);
+    assert!(results.get(0).unwrap());
+    assert!(!results.get(1).unwrap());
+    assert_eq!(
+        s.token.balance(&staff),
+        USDC - USDC * FEE_BPS as i128 / 10_000
+    );
+
+    s.client.pause();
+    advance(&s, MONTH);
+    assert_eq!(
+        s.client.try_disburse_batch(&soroban_sdk::vec![&s.env, id]),
+        Err(Ok(Error::Paused))
+    );
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::Paused)));
+    s.client.unpause();
+    assert_eq!(
+        s.client.disburse_batch(&soroban_sdk::vec![&s.env, id]),
+        soroban_sdk::vec![&s.env, true]
+    );
+    assert_eq!(
+        s.client.disburse_batch(&soroban_sdk::Vec::new(&s.env)),
+        soroban_sdk::Vec::new(&s.env)
+    );
+}
+
+#[test]
+fn disburse_batch_returns_false_for_skipped_items_instead_of_failing() {
+    let s = setup();
+    let (boss_a, staff_a, due) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+    let (_boss_b, staff_b, unfunded) = funded_schedule(&s, 10 * USDC, 100 * USDC);
+    let staff_c = Address::generate(&s.env);
+    let not_due = s
+        .client
+        .create_schedules(
+            &boss_a,
+            &soroban_sdk::vec![&s.env, input(&s, &staff_c, 100 * USDC, MONTH, "later")],
+            &(now(&s) + 1),
+        )
+        .get(0)
+        .unwrap();
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+
+    let results = s.client.disburse_batch(&soroban_sdk::vec![
+        &s.env, due, unfunded, not_due, 999 // unknown id
+    ]);
+    assert_eq!(
+        results,
+        soroban_sdk::vec![&s.env, true, false, false, false]
+    );
+    assert_eq!(s.token.balance(&staff_a), 100 * USDC - fee);
+    assert_eq!(s.token.balance(&staff_b), 0);
+    assert_eq!(next_due_of(&s, unfunded), START);
+    assert_eq!(s.token.balance(&staff_c), 0);
+    assert_eq!(next_due_of(&s, not_due), START + 1);
+    assert_eq!(s.client.escrow_of(&boss_a), 900 * USDC);
+    assert_eq!(s.token.balance(&s.contract), s.client.total_escrow());
+
+    // One second later the third item is due too.
+    advance(&s, 1);
+    assert_eq!(
+        s.client
+            .disburse_batch(&soroban_sdk::vec![&s.env, due, unfunded, not_due]),
+        soroban_sdk::vec![&s.env, false, false, true]
+    );
+    assert_eq!(s.token.balance(&staff_c), 100 * USDC - fee);
 }

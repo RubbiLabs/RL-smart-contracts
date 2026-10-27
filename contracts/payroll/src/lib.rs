@@ -30,7 +30,10 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, ContractExecutable, Env};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, token, Address, BytesN, ContractExecutable, Env, String,
+    Vec,
+};
 
 pub use errors::Error;
 
@@ -48,6 +51,49 @@ pub const MIN_PERIOD: u64 = 86_400;
 pub const MAX_PERIOD: u64 = 366 * 86_400;
 /// Longest allowed schedule label, in bytes.
 pub const MAX_LABEL_LEN: u32 = 64;
+
+// ---- public types --------------------------------------------------------------
+
+/// Lifecycle state of a schedule.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduleStatus {
+    /// Disbursed every period.
+    Active,
+    /// Paused by the employer; not disbursed until resumed. Periods that
+    /// fall due while paused stay owed.
+    Paused,
+    /// Cancelled by the employer. Final.
+    Cancelled,
+}
+
+/// One schedule to create. `label` is a short description such as
+/// "Design lead" (at most 64 bytes); no personal data beyond the recipient
+/// address is stored.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleInput {
+    pub recipient: Address,
+    pub amount: i128,
+    pub period: u64,
+    pub label: String,
+}
+
+/// A recurring salary payment from `employer` to `recipient`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Schedule {
+    pub id: u64,
+    pub employer: Address,
+    pub recipient: Address,
+    pub amount: i128,
+    pub period: u64,
+    /// Ledger timestamp (seconds) from which the next period may be paid.
+    pub next_due: u64,
+    pub status: ScheduleStatus,
+    pub label: String,
+    pub created_at: u64,
+}
 
 /// The payroll contract.
 #[contract]
@@ -128,6 +174,125 @@ impl PayrollContract {
 
         events::EscrowWithdrawn { employer, amount }.publish(&env);
         Ok(())
+    }
+
+    // ---- schedules (employer) ----------------------------------------------
+
+    /// Create up to 50 schedules for `employer`, all first due at
+    /// `first_due`, and return their ids in input order. Every input is
+    /// validated before anything is written, so the call is atomic: one bad
+    /// input creates no schedules at all. Escrow is not checked here; it is
+    /// checked at each disbursement.
+    ///
+    /// Auth: `employer`.
+    /// Errors: `Paused`, `TooManySchedules` (> 50 inputs), `FirstDueInPast`
+    /// (`first_due < now`), `InvalidAmount` (<= 0), `InvalidPeriod` (outside
+    /// 1..=366 days), `LabelTooLong` (> 64 bytes).
+    /// Events: one `schedule_created` per schedule.
+    pub fn create_schedules(
+        env: Env,
+        employer: Address,
+        inputs: Vec<ScheduleInput>,
+        first_due: u64,
+    ) -> Result<Vec<u64>, Error> {
+        employer.require_auth();
+        require_not_paused(&env)?;
+        if inputs.len() > MAX_SCHEDULES_PER_CALL {
+            return Err(Error::TooManySchedules);
+        }
+        let now = env.ledger().timestamp();
+        if first_due < now {
+            return Err(Error::FirstDueInPast);
+        }
+        // Validate everything first...
+        for input in inputs.iter() {
+            require_positive(input.amount)?;
+            require_valid_period(input.period)?;
+            if input.label.len() > MAX_LABEL_LEN {
+                return Err(Error::LabelTooLong);
+            }
+        }
+        storage::extend_instance(&env);
+
+        // ...then write.
+        let mut ids = Vec::new(&env);
+        for input in inputs.iter() {
+            let id = storage::next_schedule_id(&env);
+            storage::set_schedule(
+                &env,
+                &Schedule {
+                    id,
+                    employer: employer.clone(),
+                    recipient: input.recipient.clone(),
+                    amount: input.amount,
+                    period: input.period,
+                    next_due: first_due,
+                    status: ScheduleStatus::Active,
+                    label: input.label.clone(),
+                    created_at: now,
+                },
+            );
+            ids.push_back(id);
+            events::ScheduleCreated {
+                employer: employer.clone(),
+                schedule_id: id,
+                recipient: input.recipient,
+                amount: input.amount,
+                period: input.period,
+                next_due: first_due,
+            }
+            .publish(&env);
+        }
+        Ok(ids)
+    }
+
+    // ---- disbursing (permissionless, time-gated) ---------------------------
+
+    /// Pay one period of schedule `schedule_id`, if it is due.
+    ///
+    /// Requires status `Active` and `now >= next_due`. If the employer's
+    /// escrow is smaller than the schedule amount, nothing changes,
+    /// `disburse_failed` is emitted and `false` is returned (the period
+    /// stays owed). Otherwise the escrow is debited `amount`, `next_due`
+    /// advances by exactly one period, the recipient receives
+    /// `amount - fee` and the fee recipient `fee`, `disbursed` is emitted
+    /// and `true` is returned.
+    ///
+    /// Back pay: `next_due` always advances by exactly one period, so N
+    /// missed periods are paid by N calls, each of them time-gated.
+    ///
+    /// Auth: none (permissionless).
+    /// Errors: `Paused`, `ScheduleNotFound`, `NotActive` (paused or
+    /// cancelled), `NotDue`, `Overflow`.
+    /// Events: `disbursed` or `disburse_failed`.
+    pub fn disburse(env: Env, schedule_id: u64) -> Result<bool, Error> {
+        require_not_paused(&env)?;
+        storage::extend_instance(&env);
+        disburse_one(&env, schedule_id)
+    }
+
+    /// Pay one period of every schedule in `ids` that is due. Returns one
+    /// `bool` per input id, in order: `true` when a period was paid, `false`
+    /// when the item was skipped for any per-item reason (not due, not
+    /// active, unknown id) or its employer's escrow was insufficient (as in
+    /// `disburse`).
+    ///
+    /// Auth: none (permissionless).
+    /// Errors: `BatchTooLarge` (> 25 ids), `Paused`. Per-item errors never
+    /// fail the batch.
+    /// Events: as `disburse`, per item.
+    pub fn disburse_batch(env: Env, ids: Vec<u64>) -> Result<Vec<bool>, Error> {
+        if ids.len() > MAX_BATCH {
+            return Err(Error::BatchTooLarge);
+        }
+        require_not_paused(&env)?;
+        storage::extend_instance(&env);
+
+        let mut results = Vec::new(&env);
+        for id in ids.iter() {
+            results.push_back(disburse_one(&env, id).unwrap_or(false));
+        }
+        Ok(results)
     }
 
     // ---- admin: fees -------------------------------------------------------
@@ -236,6 +401,11 @@ impl PayrollContract {
 
     // ---- reads -------------------------------------------------------------
 
+    /// Schedule by id. Auth: none. Errors: `ScheduleNotFound`.
+    pub fn get_schedule(env: Env, schedule_id: u64) -> Result<Schedule, Error> {
+        storage::get_schedule(&env, schedule_id).ok_or(Error::ScheduleNotFound)
+    }
+
     /// `employer`'s escrow balance. Auth: none.
     pub fn escrow_of(env: Env, employer: Address) -> i128 {
         storage::get_escrow(&env, &employer)
@@ -299,6 +469,74 @@ fn require_positive(amount: i128) -> Result<(), Error> {
         return Err(Error::InvalidAmount);
     }
     Ok(())
+}
+
+fn require_valid_period(period: u64) -> Result<(), Error> {
+    if !(MIN_PERIOD..=MAX_PERIOD).contains(&period) {
+        return Err(Error::InvalidPeriod);
+    }
+    Ok(())
+}
+
+/// `amount * fee_bps / 10_000`, rounded down.
+fn fee_for(env: &Env, amount: i128) -> Result<i128, Error> {
+    let fee = amount
+        .checked_mul(i128::from(storage::get_fee_bps(env)))
+        .ok_or(Error::Overflow)?
+        / BPS_DENOMINATOR;
+    Ok(fee)
+}
+
+/// The body of `disburse` for one schedule, without the pause check.
+fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
+    let mut schedule = storage::get_schedule(env, schedule_id).ok_or(Error::ScheduleNotFound)?;
+    if schedule.status != ScheduleStatus::Active {
+        return Err(Error::NotActive);
+    }
+    let now = env.ledger().timestamp();
+    if now < schedule.next_due {
+        return Err(Error::NotDue);
+    }
+
+    let escrow = storage::get_escrow(env, &schedule.employer);
+    if escrow < schedule.amount {
+        events::DisburseFailed {
+            employer: schedule.employer,
+            schedule_id,
+            amount: schedule.amount,
+            escrow,
+        }
+        .publish(env);
+        return Ok(false);
+    }
+
+    let fee = fee_for(env, schedule.amount)?;
+    // Effects: debit the escrow and advance by exactly one period (L3)...
+    debit_escrow(env, &schedule.employer, schedule.amount)?;
+    schedule.next_due = schedule
+        .next_due
+        .checked_add(schedule.period)
+        .ok_or(Error::Overflow)?;
+    storage::set_schedule(env, &schedule);
+
+    // ...then interactions.
+    let token = token::TokenClient::new(env, &storage::get_token(env));
+    let this = env.current_contract_address();
+    token.transfer(&this, &schedule.recipient, &(schedule.amount - fee));
+    if fee > 0 {
+        token.transfer(&this, storage::get_fee_recipient(env), &fee);
+    }
+
+    events::Disbursed {
+        employer: schedule.employer,
+        schedule_id,
+        recipient: schedule.recipient,
+        amount: schedule.amount,
+        fee,
+        next_due: schedule.next_due,
+    }
+    .publish(env);
+    Ok(true)
 }
 
 /// Add `amount` to `employer`'s escrow and to the running total.
