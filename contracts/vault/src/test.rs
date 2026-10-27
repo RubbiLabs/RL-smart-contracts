@@ -923,3 +923,181 @@ fn upgrade_by_admin_replaces_the_executable() {
     s.client.withdraw(&user, &100);
     assert_eq!(s.token.balance(&user), 100);
 }
+
+// ---- 7. balance invariant across a mixed sequence -----------------------------
+
+/// sum(Balance(*)) == total_balances() == the vault's token balance, checked
+/// after every step of a mixed sequence (no direct token transfers to the
+/// vault happen in this scenario).
+#[test]
+fn balance_invariant_holds_across_mixed_sequence() {
+    let s = setup();
+    let alice = funded_user(&s, 1_000 * USDC);
+    let bob = funded_user(&s, 1_000 * USDC);
+    let carol = funded_user(&s, 1_000 * USDC);
+    s.token_admin.mint(&s.treasury, &(1_000 * USDC));
+    let users = [&alice, &bob, &carol];
+
+    let check = |step: &str| {
+        let sum: i128 = users.iter().map(|u| s.client.balance(u)).sum();
+        assert_eq!(
+            sum,
+            s.client.total_balances(),
+            "total mismatch after {step}"
+        );
+        assert_eq!(
+            sum,
+            s.token.balance(&s.vault),
+            "token balance mismatch after {step}"
+        );
+    };
+
+    check("start");
+    s.client.deposit(&alice, &(300 * USDC));
+    check("alice deposit");
+    s.client.deposit(&bob, &(500 * USDC));
+    check("bob deposit");
+    s.client
+        .settle_card_spend(&alice, &(120 * USDC), &reference(&s, 1));
+    check("alice spend");
+    s.client.withdraw(&bob, &(200 * USDC));
+    check("bob withdraw");
+    s.client
+        .credit_refund(&alice, &(20 * USDC), &reference(&s, 2));
+    check("alice refund");
+    s.client.deposit(&carol, &USDC);
+    check("carol deposit");
+    // Failed calls must not disturb the invariant either.
+    assert!(s.client.try_withdraw(&carol, &(2 * USDC)).is_err());
+    assert!(s
+        .client
+        .try_settle_card_spend(&bob, &(301 * USDC), &reference(&s, 3))
+        .is_err());
+    assert!(s
+        .client
+        .try_settle_card_spend(&alice, &1, &reference(&s, 1))
+        .is_err());
+    check("rejected calls");
+    s.client.pause();
+    s.client.withdraw(&alice, &(200 * USDC));
+    check("withdraw while paused");
+    s.client.unpause();
+    s.client
+        .settle_card_spend(&bob, &(300 * USDC), &reference(&s, 3));
+    check("bob spend");
+    s.client.withdraw(&carol, &USDC);
+    check("carol withdraw");
+
+    assert_eq!(s.client.balance(&alice), 0);
+    assert_eq!(s.client.balance(&bob), 0);
+    assert_eq!(s.client.balance(&carol), 0);
+    assert_eq!(s.client.total_balances(), 0);
+    assert_eq!(s.token.balance(&s.vault), 0);
+    assert_eq!(
+        s.token.balance(&s.treasury),
+        (1_000 + 120 - 20 + 300) * USDC
+    );
+}
+
+// ---- 14. every state change emits its event -----------------------------------
+
+#[test]
+fn every_state_change_emits_its_event() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.token_admin.mint(&s.treasury, &100);
+    let new_operator = Address::generate(&s.env);
+    let new_treasury = Address::generate(&s.env);
+    let new_admin = Address::generate(&s.env);
+
+    // Each closure performs one state change; the expected event follows.
+    macro_rules! expect_event {
+        ($call:expr, $event:expr) => {
+            $call;
+            assert_eq!(
+                s.env.events().all().filter_by_contract(&s.vault),
+                [$event.to_xdr(&s.env, &s.vault)]
+            );
+        };
+    }
+
+    expect_event!(
+        s.client.deposit(&user, &100),
+        events::Deposit {
+            user: user.clone(),
+            amount: 100
+        }
+    );
+    expect_event!(
+        s.client.withdraw(&user, &10),
+        events::Withdraw {
+            user: user.clone(),
+            amount: 10
+        }
+    );
+    expect_event!(
+        s.client.settle_card_spend(&user, &20, &reference(&s, 1)),
+        events::CardSpendSettled {
+            user: user.clone(),
+            amount: 20,
+            reference: reference(&s, 1)
+        }
+    );
+    expect_event!(
+        s.client.credit_refund(&user, &5, &reference(&s, 2)),
+        events::RefundCredited {
+            user: user.clone(),
+            amount: 5,
+            reference: reference(&s, 2)
+        }
+    );
+    expect_event!(s.client.pause(), events::Paused {});
+    expect_event!(s.client.unpause(), events::Unpaused {});
+    expect_event!(
+        s.client.set_operator(&new_operator),
+        events::OperatorSet {
+            operator: new_operator.clone()
+        }
+    );
+    expect_event!(
+        s.client.set_treasury(&new_treasury),
+        events::TreasurySet {
+            treasury: new_treasury.clone()
+        }
+    );
+    expect_event!(
+        s.client.propose_admin(&new_admin),
+        events::AdminProposed {
+            pending_admin: new_admin.clone()
+        }
+    );
+    expect_event!(
+        s.client.accept_admin(),
+        events::AdminTransferred {
+            new_admin: new_admin.clone(),
+            old_admin: s.admin.clone()
+        }
+    );
+
+    // Reads and rejected calls emit nothing.
+    s.client.balance(&user);
+    assert_eq!(
+        s.env
+            .events()
+            .all()
+            .filter_by_contract(&s.vault)
+            .events()
+            .len(),
+        0
+    );
+    assert!(s.client.try_withdraw(&user, &0).is_err());
+    assert_eq!(
+        s.env
+            .events()
+            .all()
+            .filter_by_contract(&s.vault)
+            .events()
+            .len(),
+        0
+    );
+}
