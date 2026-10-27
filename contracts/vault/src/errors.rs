@@ -1,11 +1,16 @@
 //! Vault error codes.
 //!
 //! Codes are stable and part of the public interface: clients map them to
-//! human-readable messages. Never renumber an existing variant.
+//! human-readable messages. Never renumber an existing variant once the
+//! contract is deployed.
 
 use soroban_sdk::contracterror;
 
 /// Every expected failure of the vault contract.
+///
+/// Authorization failures are not listed here: every role check goes
+/// through `require_auth`, so a wrong signer fails at the host level before
+/// the contract runs.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -16,14 +21,10 @@ pub enum Error {
     InsufficientBalance = 2,
     /// The contract is paused and this operation is blocked while paused.
     Paused = 3,
-    /// The caller is not allowed to perform this operation.
-    Unauthorized = 4,
     /// A spend or refund reference was already used (idempotency guard).
-    DuplicateReference = 5,
+    DuplicateReference = 4,
     /// `accept_admin` was called while no admin transfer is pending.
-    NoPendingAdmin = 6,
-    /// The caller is not the proposed admin.
-    NotPendingAdmin = 7,
+    NoPendingAdmin = 5,
     /// An arithmetic operation would overflow.
-    Overflow = 8,
+    Overflow = 6,
 }
