@@ -90,8 +90,11 @@ pub struct ChargeFailed {
 }
 
 /// `charge_skipped`: subscription `sub_id` was due but not charged, and its
-/// state was left unchanged. `reason` is currently always
-/// `merchant_inactive`.
+/// state was left unchanged (nothing pulled, no allowance consumed, not
+/// `PastDue`, `next_due` unchanged). `reason` is one of:
+/// - `merchant_inactive`: the admin deactivated the plan's merchant;
+/// - `payout_unavailable`: the merchant's payout address cannot receive
+///   USDC right now (no trustline, or a frozen one).
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChargeSkipped {

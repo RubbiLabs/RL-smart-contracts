@@ -64,4 +64,7 @@ pub enum Error {
     NoPendingAdmin = 22,
     /// An arithmetic operation would overflow.
     Overflow = 23,
+    /// The merchant's payout address cannot receive USDC: it has no USDC
+    /// trustline, or the trustline is frozen.
+    PayoutUnavailable = 24,
 }

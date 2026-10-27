@@ -3,6 +3,7 @@
 extern crate std;
 
 use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error,
     testutils::{
         Address as _, AuthorizedFunction, AuthorizedInvocation, Events as _, Ledger as _, MockAuth,
         MockAuthInvoke,
@@ -37,23 +38,42 @@ struct Setup {
     client: SubscriptionsContractClient<'static>,
 }
 
+/// The default setup: the token is the SDK's test Stellar Asset Contract.
 fn setup() -> Setup {
+    let env = new_env();
+    let token_issuer = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_issuer);
+    build(env, sac.address())
+}
+
+/// Like `setup`, but the token is [`MockToken`], which can be told to reject
+/// one address the way the real SAC rejects an account without a USDC
+/// trustline. Returns the mock's client as well.
+fn setup_with_mock_token() -> (Setup, MockTokenClient<'static>) {
+    let env = new_env();
+    let mock = env.register(MockToken, ());
+    let mock_client = MockTokenClient::new(&env, &mock);
+    (build(env, mock), mock_client)
+}
+
+fn new_env() -> Env {
     let env = Env::default();
     env.ledger().with_mut(|li| {
         li.timestamp = START;
         li.sequence_number = 1_000;
     });
+    env
+}
+
+fn build(env: Env, token_address: Address) -> Setup {
     let admin = Address::generate(&env);
     let fee_recipient = Address::generate(&env);
-    let token_issuer = Address::generate(&env);
-
-    let sac = env.register_stellar_asset_contract_v2(token_issuer);
-    let token = TokenClient::new(&env, &sac.address());
-    let token_admin = StellarAssetClient::new(&env, &sac.address());
+    let token = TokenClient::new(&env, &token_address);
+    let token_admin = StellarAssetClient::new(&env, &token_address);
 
     let contract = env.register(
         SubscriptionsContract,
-        (&admin, &sac.address(), &fee_recipient, FEE_BPS),
+        (&admin, &token_address, &fee_recipient, FEE_BPS),
     );
     let client = SubscriptionsContractClient::new(&env, &contract);
 
@@ -66,6 +86,124 @@ fn setup() -> Setup {
         contract,
         client,
     }
+}
+
+// ---- mock token ----------------------------------------------------------------
+//
+// The SDK's test Stellar Asset Contract only ever sees contract addresses
+// (`testutils::Address::generate` never creates G-accounts), so it cannot
+// model a recipient without a USDC trustline. `MockToken` implements the
+// token functions the subscriptions contract uses and rejects transfers to, and
+// reads of, one configurable "unpayable" address with a contract error, the
+// way the real SAC fails for an account without a trustline
+// (`Error(Contract, #13)`, "trustline entry is missing for account"). The
+// mock uses code 100 so it cannot be mistaken for a subscriptions error code.
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum MockTokenError {
+    /// Stands in for the SAC's `TrustlineMissingError`.
+    Unpayable = 100,
+    InsufficientBalance = 101,
+    InsufficientAllowance = 102,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum MockKey {
+    Balance(Address),
+    Allowance(Address, Address),
+    Unpayable,
+}
+
+#[contract]
+pub struct MockToken;
+
+#[contractimpl]
+impl MockToken {
+    /// Make `addr` unable to hold the token. Pass a fresh address to make
+    /// everyone payable again.
+    pub fn set_unpayable(env: Env, addr: Address) {
+        env.storage().instance().set(&MockKey::Unpayable, &addr);
+    }
+
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        require_payable(&env, &to);
+        set_balance(&env, &to, balance_of(&env, &to) + amount);
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        require_payable(&env, &id);
+        balance_of(&env, &id)
+    }
+
+    pub fn authorized(env: Env, id: Address) -> bool {
+        require_payable(&env, &id);
+        true
+    }
+
+    pub fn approve(env: Env, from: Address, spender: Address, amount: i128, _live_until: u32) {
+        from.require_auth();
+        env.storage()
+            .instance()
+            .set(&MockKey::Allowance(from, spender), &amount);
+    }
+
+    pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&MockKey::Allowance(from, spender))
+            .unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        move_tokens(&env, &from, &to, amount);
+    }
+
+    pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        spender.require_auth();
+        let allowance = Self::allowance(env.clone(), from.clone(), spender.clone());
+        if allowance < amount {
+            panic_with_error!(&env, MockTokenError::InsufficientAllowance);
+        }
+        env.storage().instance().set(
+            &MockKey::Allowance(from.clone(), spender),
+            &(allowance - amount),
+        );
+        move_tokens(&env, &from, &to, amount);
+    }
+}
+
+fn require_payable(env: &Env, addr: &Address) {
+    let unpayable: Option<Address> = env.storage().instance().get(&MockKey::Unpayable);
+    if unpayable.as_ref() == Some(addr) {
+        panic_with_error!(env, MockTokenError::Unpayable);
+    }
+}
+
+fn balance_of(env: &Env, addr: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&MockKey::Balance(addr.clone()))
+        .unwrap_or(0)
+}
+
+fn set_balance(env: &Env, addr: &Address, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&MockKey::Balance(addr.clone()), &amount);
+}
+
+fn move_tokens(env: &Env, from: &Address, to: &Address, amount: i128) {
+    require_payable(env, to);
+    let from_balance = balance_of(env, from);
+    if from_balance < amount {
+        panic_with_error!(env, MockTokenError::InsufficientBalance);
+    }
+    set_balance(env, from, from_balance - amount);
+    set_balance(env, to, balance_of(env, to) + amount);
 }
 
 /// Whether a `try_*` call to a function *without* a contract error type
@@ -1032,6 +1170,182 @@ fn charge_skips_subscriptions_of_inactive_merchants_until_reactivated() {
     assert_eq!(status_of(&s, sub_id), SubStatus::Active);
     assert_eq!(s.token.balance(&user), 980 * USDC);
     assert_eq!(next_due_of(&s, sub_id), START + 2 * MONTH);
+}
+
+// ---- unpayable payout address: nothing pulled, allowance untouched ----------------
+
+#[test]
+fn add_merchant_rejects_a_payout_address_that_cannot_receive_usdc() {
+    let (s, mock) = setup_with_mock_token();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+    mock.set_unpayable(&payout);
+
+    s.env.mock_all_auths();
+    assert_eq!(
+        s.client.try_add_merchant(&merchant, &payout),
+        Err(Ok(Error::PayoutUnavailable))
+    );
+    assert_eq!(s.client.get_merchant(&merchant), None);
+
+    // With a payable payout address the same merchant is accepted.
+    let payable = Address::generate(&s.env);
+    s.client.add_merchant(&merchant, &payable);
+    assert_eq!(s.client.get_merchant(&merchant).unwrap().payout, payable);
+}
+
+#[test]
+fn subscribe_fails_cleanly_when_the_payout_address_cannot_receive_usdc() {
+    let (s, mock) = setup_with_mock_token();
+    let (_merchant, payout, plan_id) = merchant_with_plan(&s, 10 * USDC);
+    let user = subscriber(&s, 100 * USDC);
+
+    // The payout address became unpayable after onboarding (trustline
+    // removed or frozen).
+    mock.set_unpayable(&payout);
+    assert_eq!(
+        s.client.try_subscribe(&user, &plan_id),
+        Err(Ok(Error::PayoutUnavailable))
+    );
+    // Nothing pulled, nothing written, allowance untouched, no id consumed.
+    assert_eq!(s.token.balance(&user), 100 * USDC);
+    assert_eq!(s.token.allowance(&user, &s.contract), 100 * USDC);
+    assert_eq!(s.client.sub_id_of(&user, &plan_id), None);
+    assert_eq!(s.token.balance(&s.contract), 0);
+    assert_eq!(s.token.balance(&s.fee_recipient), 0);
+
+    mock.set_unpayable(&Address::generate(&s.env));
+    assert_eq!(s.client.subscribe(&user, &plan_id), 1);
+}
+
+#[test]
+fn charge_skips_when_the_payout_address_cannot_receive_usdc() {
+    let (s, mock) = setup_with_mock_token();
+    let (_merchant, payout, plan_id) = merchant_with_plan(&s, 10 * USDC);
+    let user = subscriber(&s, 1_000 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    let payout_before = s.token.balance(&payout);
+    let fees_before = s.token.balance(&s.fee_recipient);
+    let allowance_before = s.token.allowance(&user, &s.contract);
+    assert_eq!(allowance_before, 990 * USDC);
+
+    mock.set_unpayable(&payout);
+    advance(&s, MONTH);
+    assert!(!s.client.charge(&sub_id));
+    assert_eq!(
+        last_events(&s),
+        [events::ChargeSkipped {
+            subscriber: user.clone(),
+            sub_id,
+            reason: Symbol::new(&s.env, "payout_unavailable"),
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    // Same handling as an inactive merchant: no pull, no allowance consumed,
+    // not PastDue, next_due unchanged, no funds moved.
+    let sub = s.client.get_subscription(&sub_id);
+    assert_eq!(sub.status, SubStatus::Active);
+    assert_eq!(sub.next_due, START + MONTH);
+    assert_eq!(s.token.balance(&user), 990 * USDC);
+    assert_eq!(s.token.allowance(&user, &s.contract), allowance_before);
+    assert_eq!(s.token.balance(&s.fee_recipient), fees_before);
+    assert_eq!(s.token.balance(&s.contract), 0);
+    assert!(
+        s.token.try_balance(&payout).is_err(),
+        "like the SAC, unreadable"
+    );
+
+    // Once the payout address can receive USDC, the next charge succeeds
+    // (once, no back-charging).
+    mock.set_unpayable(&Address::generate(&s.env));
+    assert_eq!(s.token.balance(&payout), payout_before);
+    assert!(s.client.charge(&sub_id));
+    assert_eq!(s.token.balance(&user), 980 * USDC);
+    assert_eq!(s.token.allowance(&user, &s.contract), 980 * USDC);
+    assert_eq!(next_due_of(&s, sub_id), START + 2 * MONTH);
+}
+
+#[test]
+fn charge_batch_charges_everyone_else_when_one_payout_is_unpayable() {
+    let (s, mock) = setup_with_mock_token();
+    let (_merchant_a, payout_a, plan_a) = merchant_with_plan(&s, 10 * USDC);
+    let (_merchant_b, payout_b, plan_b) = merchant_with_plan(&s, 20 * USDC);
+    let (_merchant_c, payout_c, plan_c) = merchant_with_plan(&s, 30 * USDC);
+    let user_a = subscriber(&s, 1_000 * USDC);
+    let user_b = subscriber(&s, 1_000 * USDC);
+    let user_c = subscriber(&s, 1_000 * USDC);
+    let sub_a = s.client.subscribe(&user_a, &plan_a);
+    let sub_b = s.client.subscribe(&user_b, &plan_b);
+    let sub_c = s.client.subscribe(&user_c, &plan_c);
+    let (payout_a_before, payout_c_before) =
+        (s.token.balance(&payout_a), s.token.balance(&payout_c));
+    let fees_before = s.token.balance(&s.fee_recipient);
+    let fee = |amount: i128| amount * FEE_BPS as i128 / 10_000;
+
+    mock.set_unpayable(&payout_b);
+    advance(&s, MONTH);
+    assert_eq!(
+        s.client
+            .charge_batch(&soroban_sdk::vec![&s.env, sub_a, sub_b, sub_c]),
+        soroban_sdk::vec![&s.env, true, false, true]
+    );
+    let batch_events = last_events(&s);
+    assert_eq!(batch_events.events().len(), 3);
+    assert_eq!(
+        batch_events.events()[1],
+        events::ChargeSkipped {
+            subscriber: user_b.clone(),
+            sub_id: sub_b,
+            reason: Symbol::new(&s.env, "payout_unavailable"),
+        }
+        .to_xdr(&s.env, &s.contract)
+    );
+    // A and C charged and paid out; B untouched in every respect.
+    assert_eq!(s.token.balance(&user_a), 980 * USDC);
+    assert_eq!(s.token.balance(&user_c), 940 * USDC);
+    assert_eq!(
+        s.token.balance(&payout_a),
+        payout_a_before + 10 * USDC - fee(10 * USDC)
+    );
+    assert_eq!(
+        s.token.balance(&payout_c),
+        payout_c_before + 30 * USDC - fee(30 * USDC)
+    );
+    assert_eq!(
+        s.token.balance(&s.fee_recipient),
+        fees_before + fee(10 * USDC) + fee(30 * USDC)
+    );
+    assert_eq!(s.token.balance(&user_b), 980 * USDC);
+    assert_eq!(s.token.allowance(&user_b, &s.contract), 980 * USDC);
+    let sub = s.client.get_subscription(&sub_b);
+    assert_eq!(sub.status, SubStatus::Active);
+    assert_eq!(sub.next_due, START + MONTH);
+    assert_eq!(s.token.balance(&s.contract), 0);
+}
+
+#[test]
+fn unpayable_fee_recipient_aborts_the_whole_charge() {
+    // The fee recipient is admin-controlled and the deploy script creates
+    // its trustline, so there is no per-item handling for it: the call
+    // fails as a whole and the host rolls back the pull and the payout.
+    let (s, mock) = setup_with_mock_token();
+    let (_merchant, payout, plan_id) = merchant_with_plan(&s, 10 * USDC);
+    let user = subscriber(&s, 1_000 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    let payout_before = s.token.balance(&payout);
+    advance(&s, MONTH);
+    mock.set_unpayable(&s.fee_recipient);
+
+    assert_eq!(
+        s.client.try_charge(&sub_id),
+        Err(Err(InvokeError::Contract(MockTokenError::Unpayable as u32)))
+    );
+    assert_eq!(s.token.balance(&user), 990 * USDC);
+    assert_eq!(s.token.allowance(&user, &s.contract), 990 * USDC);
+    assert_eq!(s.token.balance(&payout), payout_before);
+    assert_eq!(s.token.balance(&s.contract), 0);
+    assert_eq!(status_of(&s, sub_id), SubStatus::Active);
+    assert_eq!(next_due_of(&s, sub_id), START + MONTH);
 }
 
 // ---- charge_batch -----------------------------------------------------------------

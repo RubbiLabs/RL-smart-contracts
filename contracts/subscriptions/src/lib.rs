@@ -137,13 +137,19 @@ impl SubscriptionsContract {
     // ---- merchants (admin allowlist) ---------------------------------------
 
     /// Allowlist `merchant` with payout address `payout`. New merchants are
-    /// active.
+    /// active. `payout` must be able to receive USDC already (a regular
+    /// account needs a USDC trustline first), so an unpayable payout
+    /// address is caught at onboarding.
     ///
-    /// Auth: admin. Errors: `MerchantExists`. Events: `merchant_added`.
+    /// Auth: admin. Errors: `MerchantExists`, `PayoutUnavailable`.
+    /// Events: `merchant_added`.
     pub fn add_merchant(env: Env, merchant: Address, payout: Address) -> Result<(), Error> {
         storage::get_admin(&env).require_auth();
         if storage::get_merchant(&env, &merchant).is_some() {
             return Err(Error::MerchantExists);
+        }
+        if !payout_available(&env, &payout) {
+            return Err(Error::PayoutUnavailable);
         }
         storage::extend_instance(&env);
         storage::set_merchant(
@@ -263,7 +269,9 @@ impl SubscriptionsContract {
     /// Auth: `subscriber`.
     /// Errors: `Paused`, `PlanNotFound`, `PlanInactive`, `MerchantNotFound`,
     /// `MerchantInactive`, `AlreadySubscribed` (a non-cancelled subscription
-    /// to this plan exists), `PaymentFailed`, `Overflow`.
+    /// to this plan exists), `PayoutUnavailable` (the merchant's payout
+    /// address cannot receive USDC; nothing is pulled), `PaymentFailed`,
+    /// `Overflow`.
     /// Events: `subscribed`, then `charged`.
     pub fn subscribe(env: Env, subscriber: Address, plan_id: u32) -> Result<u64, Error> {
         subscriber.require_auth();
@@ -275,6 +283,9 @@ impl SubscriptionsContract {
         let merchant = require_active_merchant(&env, &plan.merchant)?;
         if storage::get_sub_id_of(&env, &subscriber, plan_id).is_some() {
             return Err(Error::AlreadySubscribed);
+        }
+        if !payout_available(&env, &merchant.payout) {
+            return Err(Error::PayoutUnavailable);
         }
         storage::extend_instance(&env);
 
@@ -403,12 +414,24 @@ impl SubscriptionsContract {
     /// period (if that is still in the past, to `now + period`: a subscriber
     /// who was past due for three months is charged once, not three times).
     ///
-    /// Returns `false` without changing `next_due` in two cases:
+    /// Returns `false` without changing `next_due` in three cases:
     /// - the pull failed (allowance or balance): status becomes `PastDue`
     ///   and `charge_failed` is emitted;
     /// - the plan's merchant is inactive: nothing is pulled, nothing is
-    ///   written, `charge_skipped` is emitted. Charging resumes when the
-    ///   admin reactivates the merchant.
+    ///   written, `charge_skipped` (`merchant_inactive`) is emitted.
+    ///   Charging resumes when the admin reactivates the merchant;
+    /// - the merchant's payout address cannot receive USDC (no trustline, or
+    ///   a frozen one): nothing is pulled, so the subscriber's allowance is
+    ///   not consumed, nothing is written, `charge_skipped`
+    ///   (`payout_unavailable`) is emitted. Charging resumes once the payout
+    ///   address can receive USDC again.
+    ///
+    /// The payout pre-check is read-only (`authorized` on the Stellar Asset
+    /// Contract). Two residual cases are not covered and still abort the
+    /// whole call: a payout trustline whose limit the payment would exceed,
+    /// and this contract's own USDC balance being frozen by the issuer. The
+    /// fee recipient is admin-controlled and its trustline is created by the
+    /// deploy script; a fee transfer that fails anyway aborts the call.
     ///
     /// Auth: none (permissionless).
     /// Errors: `Paused`, `SubscriptionNotFound`, `NotChargeable` (paused or
@@ -423,8 +446,10 @@ impl SubscriptionsContract {
     /// Charge every subscription in `sub_ids` that is due. Returns one
     /// `bool` per input id, in order: `true` when a period was charged,
     /// `false` when the item was skipped for any per-item reason (not due,
-    /// not chargeable, unknown id, inactive merchant) or its pull failed
-    /// (status set to `PastDue`, as in `charge`).
+    /// not chargeable, unknown id, inactive merchant, unpayable payout
+    /// address) or its pull failed (status set to `PastDue`, as in
+    /// `charge`). One merchant whose payout address cannot receive USDC
+    /// never blocks the other items.
     ///
     /// Auth: none (permissionless).
     /// Errors: `BatchTooLarge` (> 25 ids), `Paused`. Per-item errors never
@@ -670,8 +695,25 @@ fn pull(env: &Env, from: &Address, amount: i128) -> Result<(), ()> {
         .map_err(|_| ())
 }
 
+/// Whether `payout` can receive USDC right now: its trustline exists and is
+/// authorized. Read-only: `authorized` on the Stellar Asset Contract fails
+/// for an account without a trustline (treated as `false`) and returns
+/// `false` for a frozen one; contract addresses and the issuer are always
+/// payable. Not covered (the later `transfer` then aborts the call): a
+/// trustline limit the payment would exceed, and this contract's own
+/// balance being frozen.
+fn payout_available(env: &Env, payout: &Address) -> bool {
+    matches!(
+        token::StellarAssetClient::new(env, &storage::get_token(env)).try_authorized(payout),
+        Ok(Ok(true))
+    )
+}
+
 /// Pay `amount - fee` to `payout` and `fee` to the fee recipient out of the
-/// tokens this contract just pulled.
+/// tokens this contract just pulled. Both are plain transfers: the payout
+/// address passed `payout_available` in the same invocation, and the fee
+/// recipient is admin-controlled with a trustline created by the deploy
+/// script.
 fn pay_out(env: &Env, payout: &Address, amount: i128, fee: i128) {
     let token = token::TokenClient::new(env, &storage::get_token(env));
     let this = env.current_contract_address();
@@ -709,6 +751,17 @@ fn charge_one(env: &Env, sub_id: u64) -> Result<bool, Error> {
             subscriber: sub.subscriber,
             sub_id,
             reason: Symbol::new(env, "merchant_inactive"),
+        }
+        .publish(env);
+        return Ok(false);
+    }
+    // Checked before the pull so that an unpayable merchant never consumes
+    // the subscriber's allowance.
+    if !payout_available(env, &merchant.payout) {
+        events::ChargeSkipped {
+            subscriber: sub.subscriber,
+            sub_id,
+            reason: Symbol::new(env, "payout_unavailable"),
         }
         .publish(env);
         return Ok(false);
