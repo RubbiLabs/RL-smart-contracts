@@ -46,8 +46,11 @@ jobs:
       - name: Build contracts (wasm32v1-none)
         run: stellar contract build
 
-      - name: Test upgrade path against the built wasm
-        run: cargo test -p rubbi-vault --features wasm-upgrade-test
+      - name: Test upgrade paths against the built wasm
+        run: |
+          cargo test -p rubbi-vault --features wasm-upgrade-test
+          cargo test -p rubbi-subscriptions --features wasm-upgrade-test
+          cargo test -p rubbi-payroll --features wasm-upgrade-test
 
       - name: Upload wasm artifacts
         uses: actions/upload-artifact@v7
