@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["contracts/*"]
+
+[workspace.dependencies]
+soroban-sdk = "29.0.1"
+
+# Release profile recommended by Stellar for Soroban contracts. It matches the
+# `stellar contract init` template shipped with stellar-cli 28.1.0.
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+# Same as release but keeps debug assertions so contract logs are emitted.
+# See https://developers.stellar.org/docs/build/smart-contracts/example-contracts/logging#cargotoml-profile
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

@@ -1,14 +1,20 @@
-# Compiler files
-cache/
-out/
+# Rust build output
+target/
 
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
-/broadcast/**/dry-run/
+# Stellar CLI local state
+.stellar/
+.soroban/
 
-# Docs
-docs/
-
-# Dotenv file
+# Secrets
 .env
+
+# OS junk
+.DS_Store
+
+# Legacy Foundry build output (legacy/evm is kept for reference only)
+legacy/evm/out/
+legacy/evm/cache/
+legacy/evm/broadcast/
+
+# SDK test snapshots are regenerated on every `cargo test`
+contracts/*/test_snapshots/
