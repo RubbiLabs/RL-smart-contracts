@@ -12,6 +12,8 @@
 
 use soroban_sdk::{contracttype, Address, Env};
 
+use crate::{Merchant, Plan};
+
 /// Ledgers per day. Stellar closes a ledger roughly every 5 seconds
 /// (measured on 2026-10-27 over 100 consecutive ledgers on both testnet and
 /// mainnet via Horizon `/ledgers`: 500 s per 100 ledgers), so
@@ -22,6 +24,11 @@ pub const DAY_IN_LEDGERS: u32 = 17_280;
 pub const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
 /// ... whenever fewer than 29 days remain.
 pub const INSTANCE_THRESHOLD: u32 = INSTANCE_BUMP - DAY_IN_LEDGERS;
+
+/// Persistent entries are extended to 90 days ...
+pub const PERSISTENT_BUMP: u32 = 90 * DAY_IN_LEDGERS;
+/// ... whenever fewer than 60 days remain.
+pub const PERSISTENT_THRESHOLD: u32 = 60 * DAY_IN_LEDGERS;
 
 /// All storage keys of the subscriptions contract.
 #[contracttype]
@@ -39,6 +46,12 @@ pub enum DataKey {
     FeeBps,
     /// Pause flag (instance).
     Paused,
+    /// Next plan id to assign; ids start at 1 (instance).
+    NextPlanId,
+    /// An allowlisted merchant (persistent).
+    Merchant(Address),
+    /// A plan by id (persistent).
+    Plan(u32),
 }
 
 /// Extend the TTL of the contract instance and code.
@@ -46,6 +59,31 @@ pub fn extend_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+}
+
+fn extend_persistent(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, PERSISTENT_THRESHOLD, PERSISTENT_BUMP);
+}
+
+/// Read a persistent entry, extending its TTL if it exists.
+fn get_persistent<T: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &DataKey,
+) -> Option<T> {
+    let value = env.storage().persistent().get::<DataKey, T>(key)?;
+    extend_persistent(env, key);
+    Some(value)
+}
+
+fn set_persistent<T: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &DataKey,
+    value: &T,
+) {
+    env.storage().persistent().set(key, value);
+    extend_persistent(env, key);
 }
 
 // ---- instance config -------------------------------------------------------
@@ -116,4 +154,37 @@ pub fn is_paused(env: &Env) -> bool {
 
 pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&DataKey::Paused, &paused);
+}
+
+// ---- instance counters -----------------------------------------------------
+
+/// Allocate the next plan id (starting at 1).
+pub fn next_plan_id(env: &Env) -> u32 {
+    let id: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextPlanId)
+        .unwrap_or(1);
+    env.storage()
+        .instance()
+        .set(&DataKey::NextPlanId, &(id + 1));
+    id
+}
+
+// ---- persistent: merchants and plans ---------------------------------------
+
+pub fn get_merchant(env: &Env, merchant: &Address) -> Option<Merchant> {
+    get_persistent(env, &DataKey::Merchant(merchant.clone()))
+}
+
+pub fn set_merchant(env: &Env, merchant: &Address, value: &Merchant) {
+    set_persistent(env, &DataKey::Merchant(merchant.clone()), value);
+}
+
+pub fn get_plan(env: &Env, plan_id: u32) -> Option<Plan> {
+    get_persistent(env, &DataKey::Plan(plan_id))
+}
+
+pub fn set_plan(env: &Env, plan: &Plan) {
+    set_persistent(env, &DataKey::Plan(plan.id), plan);
 }

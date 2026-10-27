@@ -4,7 +4,48 @@
 //! events about a subscriber or merchant carry that address as the second
 //! topic, so an indexer can filter by contract + event name + address.
 
-use soroban_sdk::{contractevent, Address, BytesN};
+use soroban_sdk::{contractevent, Address, BytesN, String};
+
+/// `merchant_added`: the admin allowlisted `merchant`, paying out to
+/// `payout`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantAdded {
+    #[topic]
+    pub merchant: Address,
+    pub payout: Address,
+}
+
+/// `merchant_active_set`: the admin (de)activated `merchant`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantActiveSet {
+    #[topic]
+    pub merchant: Address,
+    pub active: bool,
+}
+
+/// `plan_created`: `merchant` created plan `plan_id`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanCreated {
+    #[topic]
+    pub merchant: Address,
+    pub plan_id: u32,
+    pub name: String,
+    pub amount: i128,
+    pub period: u64,
+}
+
+/// `plan_active_set`: `merchant` (de)activated plan `plan_id`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanActiveSet {
+    #[topic]
+    pub merchant: Address,
+    pub plan_id: u32,
+    pub active: bool,
+}
 
 /// `fee_set`: the admin changed the fee to `fee_bps` basis points.
 #[contractevent]

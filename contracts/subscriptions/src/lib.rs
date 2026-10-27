@@ -30,7 +30,9 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, ContractExecutable, Env};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, BytesN, ContractExecutable, Env, String,
+};
 
 pub use errors::Error;
 
@@ -46,6 +48,30 @@ pub const MIN_PERIOD: u64 = 86_400;
 pub const MAX_PERIOD: u64 = 366 * 86_400;
 /// Longest allowed plan name, in bytes.
 pub const MAX_NAME_LEN: u32 = 64;
+
+// ---- public types --------------------------------------------------------------
+
+/// An allowlisted merchant (biller). Charges are paid to `payout`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Merchant {
+    pub payout: Address,
+    pub active: bool,
+}
+
+/// A subscription plan offered by a merchant. `amount` is in the token's
+/// smallest unit and is charged once every `period` seconds. No personal
+/// data is stored.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Plan {
+    pub id: u32,
+    pub merchant: Address,
+    pub name: String,
+    pub amount: i128,
+    pub period: u64,
+    pub active: bool,
+}
 
 /// The subscriptions contract.
 #[contract]
@@ -77,6 +103,122 @@ impl SubscriptionsContract {
         storage::set_fee_bps(&env, fee_bps);
         storage::set_paused(&env, false);
         storage::extend_instance(&env);
+        Ok(())
+    }
+
+    // ---- merchants (admin allowlist) ---------------------------------------
+
+    /// Allowlist `merchant` with payout address `payout`. New merchants are
+    /// active.
+    ///
+    /// Auth: admin. Errors: `MerchantExists`. Events: `merchant_added`.
+    pub fn add_merchant(env: Env, merchant: Address, payout: Address) -> Result<(), Error> {
+        storage::get_admin(&env).require_auth();
+        if storage::get_merchant(&env, &merchant).is_some() {
+            return Err(Error::MerchantExists);
+        }
+        storage::extend_instance(&env);
+        storage::set_merchant(
+            &env,
+            &merchant,
+            &Merchant {
+                payout: payout.clone(),
+                active: true,
+            },
+        );
+        events::MerchantAdded { merchant, payout }.publish(&env);
+        Ok(())
+    }
+
+    /// Activate or deactivate `merchant`. An inactive merchant cannot create
+    /// plans or take new subscribers, and its existing subscriptions are
+    /// skipped by `charge` until it is reactivated.
+    ///
+    /// Auth: admin. Errors: `MerchantNotFound`. Events: `merchant_active_set`.
+    pub fn set_merchant_active(env: Env, merchant: Address, active: bool) -> Result<(), Error> {
+        storage::get_admin(&env).require_auth();
+        let mut record = storage::get_merchant(&env, &merchant).ok_or(Error::MerchantNotFound)?;
+        storage::extend_instance(&env);
+        record.active = active;
+        storage::set_merchant(&env, &merchant, &record);
+        events::MerchantActiveSet { merchant, active }.publish(&env);
+        Ok(())
+    }
+
+    // ---- plans (merchant) --------------------------------------------------
+
+    /// Create a new, active plan and return its id.
+    ///
+    /// Auth: `merchant`, which must be an active allowlisted merchant.
+    /// Errors: `MerchantNotFound`, `MerchantInactive`, `NameTooLong`
+    /// (> 64 bytes), `InvalidAmount` (<= 0), `InvalidPeriod` (outside
+    /// 1..=366 days). Events: `plan_created`.
+    pub fn create_plan(
+        env: Env,
+        merchant: Address,
+        name: String,
+        amount: i128,
+        period: u64,
+    ) -> Result<u32, Error> {
+        merchant.require_auth();
+        require_active_merchant(&env, &merchant)?;
+        if name.len() > MAX_NAME_LEN {
+            return Err(Error::NameTooLong);
+        }
+        require_positive(amount)?;
+        require_valid_period(period)?;
+        storage::extend_instance(&env);
+
+        let id = storage::next_plan_id(&env);
+        storage::set_plan(
+            &env,
+            &Plan {
+                id,
+                merchant: merchant.clone(),
+                name: name.clone(),
+                amount,
+                period,
+                active: true,
+            },
+        );
+        events::PlanCreated {
+            merchant,
+            plan_id: id,
+            name,
+            amount,
+            period,
+        }
+        .publish(&env);
+        Ok(id)
+    }
+
+    /// Activate or deactivate a plan. A deactivated plan accepts no new
+    /// subscribers; existing subscriptions keep being charged until their
+    /// subscribers cancel.
+    ///
+    /// Auth: `merchant`, which must own the plan (an inactive merchant can
+    /// still deactivate its plans). Errors: `PlanNotFound`, `NotPlanOwner`.
+    /// Events: `plan_active_set`.
+    pub fn set_plan_active(
+        env: Env,
+        merchant: Address,
+        plan_id: u32,
+        active: bool,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+        let mut plan = storage::get_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
+        if plan.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+        storage::extend_instance(&env);
+        plan.active = active;
+        storage::set_plan(&env, &plan);
+        events::PlanActiveSet {
+            merchant,
+            plan_id,
+            active,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -186,6 +328,16 @@ impl SubscriptionsContract {
 
     // ---- reads -------------------------------------------------------------
 
+    /// Merchant record, if `merchant` is allowlisted. Auth: none.
+    pub fn get_merchant(env: Env, merchant: Address) -> Option<Merchant> {
+        storage::get_merchant(&env, &merchant)
+    }
+
+    /// Plan by id. Auth: none. Errors: `PlanNotFound`.
+    pub fn get_plan(env: Env, plan_id: u32) -> Result<Plan, Error> {
+        storage::get_plan(&env, plan_id).ok_or(Error::PlanNotFound)
+    }
+
     /// Current admin. Auth: none.
     pub fn admin(env: Env) -> Address {
         storage::get_admin(&env)
@@ -224,4 +376,27 @@ fn require_fee_in_range(fee_bps: u32) -> Result<(), Error> {
         return Err(Error::FeeTooHigh);
     }
     Ok(())
+}
+
+fn require_positive(amount: i128) -> Result<(), Error> {
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+    Ok(())
+}
+
+fn require_valid_period(period: u64) -> Result<(), Error> {
+    if !(MIN_PERIOD..=MAX_PERIOD).contains(&period) {
+        return Err(Error::InvalidPeriod);
+    }
+    Ok(())
+}
+
+/// The merchant record, or an error if it is missing or inactive.
+fn require_active_merchant(env: &Env, merchant: &Address) -> Result<Merchant, Error> {
+    let record = storage::get_merchant(env, merchant).ok_or(Error::MerchantNotFound)?;
+    if !record.active {
+        return Err(Error::MerchantInactive);
+    }
+    Ok(record)
 }
