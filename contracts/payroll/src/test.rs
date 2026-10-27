@@ -1157,3 +1157,370 @@ fn employers_keep_control_while_the_contract_is_paused() {
     assert_eq!(s.client.escrow_of(&boss), 0);
     s.client.unpause();
 }
+
+// ---- fee recipient rotation --------------------------------------------------------
+
+#[test]
+fn set_fee_recipient_redirects_future_fees() {
+    let s = setup();
+    let (_boss, _staff, id) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.token.balance(&s.fee_recipient), fee);
+
+    let new_recipient = Address::generate(&s.env);
+    s.client.set_fee_recipient(&new_recipient);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "set_fee_recipient",
+            (new_recipient.clone(),).into_val(&s.env)
+        )
+    );
+    assert_eq!(s.client.fee_recipient(), new_recipient);
+
+    advance(&s, MONTH);
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.token.balance(&s.fee_recipient), fee);
+    assert_eq!(s.token.balance(&new_recipient), fee);
+}
+
+// ---- escrow invariant across a mixed sequence ----------------------------------------
+
+/// sum(Escrow(*)) == total_escrow() == the contract's token balance, checked
+/// after every step of a mixed sequence (no direct token transfers to the
+/// contract happen in this scenario).
+#[test]
+fn escrow_invariant_holds_across_mixed_sequence() {
+    let s = setup();
+    let alice = employer(&s, 1_000 * USDC);
+    let bob = employer(&s, 1_000 * USDC);
+    let staff = Address::generate(&s.env);
+    let employers = [&alice, &bob];
+
+    let check = |step: &str| {
+        let sum: i128 = employers.iter().map(|e| s.client.escrow_of(e)).sum();
+        assert_eq!(sum, s.client.total_escrow(), "total mismatch after {step}");
+        assert_eq!(
+            sum,
+            s.token.balance(&s.contract),
+            "token balance mismatch after {step}"
+        );
+    };
+
+    check("start");
+    s.client.fund(&alice, &(300 * USDC));
+    check("alice fund");
+    s.client.fund(&bob, &(500 * USDC));
+    check("bob fund");
+    let ids = s.client.create_schedules(
+        &alice,
+        &soroban_sdk::vec![
+            &s.env,
+            input(&s, &staff, 100 * USDC, MONTH, "a1"),
+            input(&s, &staff, 250 * USDC, MONTH, "a2"),
+        ],
+        &now(&s),
+    );
+    let bob_id = s
+        .client
+        .create_schedules(
+            &bob,
+            &soroban_sdk::vec![&s.env, input(&s, &staff, 200 * USDC, MONTH, "b1")],
+            &now(&s),
+        )
+        .get(0)
+        .unwrap();
+    check("schedules created");
+    // Alice can pay a1 (300 → 200) but not a2 (250 > 200); Bob pays b1.
+    assert_eq!(
+        s.client.disburse_batch(&soroban_sdk::vec![
+            &s.env,
+            ids.get(0).unwrap(),
+            ids.get(1).unwrap(),
+            bob_id
+        ]),
+        soroban_sdk::vec![&s.env, true, false, true]
+    );
+    check("batch");
+    s.client.withdraw_escrow(&bob, &(100 * USDC));
+    check("bob withdraw");
+    // Rejected calls must not disturb the invariant either.
+    assert!(s.client.try_withdraw_escrow(&alice, &(201 * USDC)).is_err());
+    assert!(s.client.try_fund(&alice, &0).is_err());
+    check("rejected calls");
+    s.client.pause();
+    s.client.withdraw_escrow(&alice, &(50 * USDC));
+    check("withdraw while paused");
+    s.client.unpause();
+    s.client.fund(&alice, &(100 * USDC));
+    assert!(s.client.disburse(&ids.get(1).unwrap()));
+    check("a2 paid after top-up");
+    s.client.cancel_schedule(&bob, &bob_id);
+    s.client.withdraw_escrow(&bob, &(200 * USDC));
+    check("bob cancelled and withdrew");
+
+    assert_eq!(s.client.escrow_of(&alice), 0);
+    assert_eq!(s.client.escrow_of(&bob), 0);
+    assert_eq!(s.client.total_escrow(), 0);
+    assert_eq!(s.token.balance(&s.contract), 0);
+    let fee = |amount: i128| amount * FEE_BPS as i128 / 10_000;
+    assert_eq!(
+        s.token.balance(&staff),
+        (100 + 250 + 200) * USDC - fee(100 * USDC) - fee(250 * USDC) - fee(200 * USDC)
+    );
+}
+
+// ---- every state change emits its event -----------------------------------------------
+
+#[test]
+fn every_state_change_emits_its_event() {
+    let s = setup();
+    let boss = employer(&s, 1_000 * USDC);
+    let staff = Address::generate(&s.env);
+    let new_recipient = Address::generate(&s.env);
+    let new_admin = Address::generate(&s.env);
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+    s.env.mock_all_auths();
+
+    macro_rules! expect_event {
+        ($call:expr, $event:expr) => {
+            $call;
+            assert_eq!(last_events(&s), [$event.to_xdr(&s.env, &s.contract)]);
+        };
+    }
+
+    expect_event!(
+        s.client.fund(&boss, &(150 * USDC)),
+        events::Funded {
+            employer: boss.clone(),
+            amount: 150 * USDC,
+        }
+    );
+    expect_event!(
+        s.client.withdraw_escrow(&boss, &(10 * USDC)),
+        events::EscrowWithdrawn {
+            employer: boss.clone(),
+            amount: 10 * USDC,
+        }
+    );
+    expect_event!(
+        s.client.create_schedules(
+            &boss,
+            &soroban_sdk::vec![&s.env, input(&s, &staff, 100 * USDC, MONTH, "Dev")],
+            &START
+        ),
+        events::ScheduleCreated {
+            employer: boss.clone(),
+            schedule_id: 1,
+            recipient: staff.clone(),
+            amount: 100 * USDC,
+            period: MONTH,
+            next_due: START,
+        }
+    );
+    expect_event!(
+        assert!(s.client.disburse(&1)),
+        events::Disbursed {
+            employer: boss.clone(),
+            schedule_id: 1,
+            recipient: staff.clone(),
+            amount: 100 * USDC,
+            fee,
+            next_due: START + MONTH,
+        }
+    );
+    advance(&s, MONTH);
+    expect_event!(
+        assert!(!s.client.disburse(&1)),
+        events::DisburseFailed {
+            employer: boss.clone(),
+            schedule_id: 1,
+            amount: 100 * USDC,
+            escrow: 40 * USDC,
+        }
+    );
+    expect_event!(
+        s.client.pause_schedule(&boss, &1),
+        events::SchedulePaused {
+            employer: boss.clone(),
+            schedule_id: 1,
+        }
+    );
+    expect_event!(
+        s.client.resume_schedule(&boss, &1),
+        events::ScheduleResumed {
+            employer: boss.clone(),
+            schedule_id: 1,
+            next_due: START + MONTH,
+        }
+    );
+    expect_event!(
+        s.client.cancel_schedule(&boss, &1),
+        events::ScheduleCancelled {
+            employer: boss.clone(),
+            schedule_id: 1,
+        }
+    );
+    expect_event!(s.client.set_fee(&10), events::FeeSet { fee_bps: 10 });
+    expect_event!(
+        s.client.set_fee_recipient(&new_recipient),
+        events::FeeRecipientSet {
+            fee_recipient: new_recipient.clone(),
+        }
+    );
+    expect_event!(s.client.pause(), events::Paused {});
+    expect_event!(s.client.unpause(), events::Unpaused {});
+    expect_event!(
+        s.client.propose_admin(&new_admin),
+        events::AdminProposed {
+            pending_admin: new_admin.clone(),
+        }
+    );
+    expect_event!(
+        s.client.accept_admin(),
+        events::AdminTransferred {
+            new_admin: new_admin.clone(),
+            old_admin: s.admin.clone(),
+        }
+    );
+
+    // Reads and rejected calls emit nothing.
+    s.client.get_schedule(&1);
+    assert_eq!(last_events(&s).events().len(), 0);
+    assert!(s.client.try_disburse(&1).is_err());
+    assert_eq!(last_events(&s).events().len(), 0);
+    assert!(s.client.try_fund(&boss, &0).is_err());
+    assert_eq!(last_events(&s).events().len(), 0);
+}
+
+// ---- no PII on-chain: enforced by the types ---------------------------------------------
+
+/// The on-chain types carry no personal data beyond the recipient address.
+/// Checked against the contract's own type spec (the XDR the SDK embeds in
+/// the wasm) and by exhaustive destructuring, which fails to compile if a
+/// field is added.
+#[test]
+fn on_chain_types_have_no_pii_fields() {
+    use soroban_sdk::xdr::{Limits, ReadXdr, ScSpecEntry};
+
+    fn field_names(spec: &[u8]) -> std::vec::Vec<std::string::String> {
+        match ScSpecEntry::from_xdr(spec, Limits::none()).unwrap() {
+            ScSpecEntry::UdtStructV0(st) => st
+                .fields
+                .iter()
+                .map(|f| f.name.to_utf8_string_lossy())
+                .collect(),
+            other => panic!("expected a struct spec, got {other:?}"),
+        }
+    }
+
+    // (The SDK sorts struct fields alphabetically in the spec.)
+    assert_eq!(
+        field_names(&ScheduleInput::spec_xdr()),
+        ["amount", "label", "period", "recipient"]
+    );
+    assert_eq!(
+        field_names(&Schedule::spec_xdr()),
+        [
+            "amount",
+            "created_at",
+            "employer",
+            "id",
+            "label",
+            "next_due",
+            "period",
+            "recipient",
+            "status"
+        ]
+    );
+    for spec in [
+        ScheduleInput::spec_xdr().as_slice(),
+        Schedule::spec_xdr().as_slice(),
+    ] {
+        for field in field_names(spec) {
+            for forbidden in ["email", "password", "phone", "name", "username", "pin"] {
+                assert!(
+                    !field.to_lowercase().contains(forbidden),
+                    "PII-looking field `{field}`"
+                );
+            }
+        }
+    }
+
+    let s = setup();
+    let (_boss, _staff, id) = funded_schedule(&s, USDC, USDC);
+    let Schedule {
+        id,
+        employer,
+        recipient,
+        amount,
+        period,
+        next_due,
+        status,
+        label,
+        created_at,
+    } = s.client.get_schedule(&id);
+    let _ = (
+        id, employer, recipient, amount, period, next_due, status, label, created_at,
+    );
+    let ScheduleInput {
+        recipient,
+        amount,
+        period,
+        label,
+    } = input(&s, &Address::generate(&s.env), USDC, MONTH, "x");
+    let _ = (recipient, amount, period, label);
+}
+
+// ---- upgrade -------------------------------------------------------------------------
+
+/// Positive upgrade path. Uploads this contract's own optimized wasm
+/// (built by `stellar contract build`) and upgrades to it, which exercises
+/// the full admin-authorized `update_current_contract` path.
+#[cfg(feature = "wasm-upgrade-test")]
+#[test]
+fn upgrade_by_admin_replaces_the_executable() {
+    const WASM: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/wasm32v1-none/release/rubbi_payroll.wasm"
+    ));
+    let s = setup();
+    let (boss, staff, id) = funded_schedule(&s, 100 * USDC, 10 * USDC);
+
+    let wasm_hash = s
+        .env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&s.env, WASM));
+
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "upgrade",
+        (wasm_hash.clone(),).into_val(&s.env),
+    );
+    s.client.upgrade(&wasm_hash);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "upgrade",
+            (wasm_hash.clone(),).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.contract)]
+    );
+
+    // Storage survived and the (now wasm) contract still works.
+    s.env.mock_all_auths();
+    assert_eq!(s.client.admin(), s.admin);
+    assert_eq!(s.client.escrow_of(&boss), 100 * USDC);
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.client.escrow_of(&boss), 90 * USDC);
+    assert!(s.token.balance(&staff) > 0);
+}
