@@ -71,6 +71,37 @@ pub struct DisburseFailed {
     pub escrow: i128,
 }
 
+/// `schedule_paused`: `employer` paused schedule `schedule_id`. Periods
+/// that fall due while paused stay owed.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchedulePaused {
+    #[topic]
+    pub employer: Address,
+    pub schedule_id: u64,
+}
+
+/// `schedule_resumed`: `employer` resumed schedule `schedule_id`;
+/// `next_due` is unchanged from before the pause.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleResumed {
+    #[topic]
+    pub employer: Address,
+    pub schedule_id: u64,
+    pub next_due: u64,
+}
+
+/// `schedule_cancelled`: `employer` cancelled schedule `schedule_id`.
+/// Final.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleCancelled {
+    #[topic]
+    pub employer: Address,
+    pub schedule_id: u64,
+}
+
 /// `fee_set`: the admin changed the fee to `fee_bps` basis points.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

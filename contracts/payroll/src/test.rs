@@ -927,3 +927,233 @@ fn disburse_batch_returns_false_for_skipped_items_instead_of_failing() {
     );
     assert_eq!(s.token.balance(&staff_c), 100 * USDC - fee);
 }
+
+// ---- employer pause / resume / cancel (L4) ---------------------------------------------
+
+#[test]
+fn only_the_employer_can_pause_resume_or_cancel() {
+    let s = setup();
+    let (boss, staff, id) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+    let (other_boss, _, other_id) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+
+    // Another employer signing for their own address but naming the
+    // victim's schedule id: rejected by the ownership check.
+    assert_eq!(
+        s.client.try_pause_schedule(&other_boss, &id),
+        Err(Ok(Error::NotEmployer))
+    );
+    assert_eq!(
+        s.client.try_resume_schedule(&other_boss, &id),
+        Err(Ok(Error::NotEmployer))
+    );
+    assert_eq!(
+        s.client.try_cancel_schedule(&other_boss, &id),
+        Err(Ok(Error::NotEmployer))
+    );
+    // L4: the recipient, the admin or a stranger signing on the employer's
+    // behalf: rejected by `require_auth`.
+    for signer in [&staff, &s.admin, &Address::generate(&s.env)] {
+        mock_auth_for(
+            &s,
+            signer,
+            "pause_schedule",
+            (boss.clone(), id).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_pause_schedule(&boss, &id),
+            Err(Err(_))
+        ));
+        mock_auth_for(
+            &s,
+            signer,
+            "resume_schedule",
+            (boss.clone(), id).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_resume_schedule(&boss, &id),
+            Err(Err(_))
+        ));
+        mock_auth_for(
+            &s,
+            signer,
+            "cancel_schedule",
+            (boss.clone(), id).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_cancel_schedule(&boss, &id),
+            Err(Err(_))
+        ));
+    }
+    s.env.mock_all_auths();
+    assert_eq!(status_of(&s, id), ScheduleStatus::Active);
+    assert_eq!(status_of(&s, other_id), ScheduleStatus::Active);
+    assert_eq!(
+        s.client.try_pause_schedule(&boss, &99),
+        Err(Ok(Error::ScheduleNotFound))
+    );
+
+    // The owner succeeds, with exactly their own authorization.
+    s.client.pause_schedule(&boss, &id);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &boss,
+            "pause_schedule",
+            (boss.clone(), id).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [events::SchedulePaused {
+            employer: boss.clone(),
+            schedule_id: id,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    assert_eq!(status_of(&s, id), ScheduleStatus::Paused);
+    assert_eq!(status_of(&s, other_id), ScheduleStatus::Active);
+}
+
+#[test]
+fn paused_schedule_is_not_disbursed_and_resume_keeps_next_due() {
+    let s = setup();
+    let (boss, staff, id) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+    assert!(s.client.disburse(&id));
+
+    s.client.pause_schedule(&boss, &id);
+    advance(&s, 3 * MONTH);
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotActive)));
+    assert_eq!(
+        s.client.disburse_batch(&soroban_sdk::vec![&s.env, id]),
+        soroban_sdk::vec![&s.env, false]
+    );
+    assert_eq!(s.token.balance(&staff), 100 * USDC - fee);
+
+    // Resume keeps next_due: the three periods that fell due while paused
+    // are still owed and are caught up one per call.
+    s.client.resume_schedule(&boss, &id);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &boss,
+            "resume_schedule",
+            (boss.clone(), id).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [events::ScheduleResumed {
+            employer: boss.clone(),
+            schedule_id: id,
+            next_due: START + MONTH,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    assert_eq!(next_due_of(&s, id), START + MONTH);
+    for n in 2..=4_i128 {
+        assert!(s.client.disburse(&id));
+        assert_eq!(s.token.balance(&staff), n * (100 * USDC - fee));
+    }
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotDue)));
+}
+
+#[test]
+fn status_transitions_follow_the_state_machine() {
+    let s = setup();
+    let (boss, _staff, id) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+
+    // Active: resume is invalid.
+    assert_eq!(
+        s.client.try_resume_schedule(&boss, &id),
+        Err(Ok(Error::NotPaused))
+    );
+    s.client.pause_schedule(&boss, &id);
+    // Paused: pause again is invalid; resume is valid.
+    assert_eq!(
+        s.client.try_pause_schedule(&boss, &id),
+        Err(Ok(Error::NotActive))
+    );
+    s.client.resume_schedule(&boss, &id);
+    assert_eq!(status_of(&s, id), ScheduleStatus::Active);
+
+    // Cancel from Active; then nothing else is possible.
+    s.client.cancel_schedule(&boss, &id);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &boss,
+            "cancel_schedule",
+            (boss.clone(), id).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [events::ScheduleCancelled {
+            employer: boss.clone(),
+            schedule_id: id,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    assert_eq!(status_of(&s, id), ScheduleStatus::Cancelled);
+    assert_eq!(
+        s.client.try_cancel_schedule(&boss, &id),
+        Err(Ok(Error::AlreadyCancelled))
+    );
+    assert_eq!(
+        s.client.try_pause_schedule(&boss, &id),
+        Err(Ok(Error::NotActive))
+    );
+    assert_eq!(
+        s.client.try_resume_schedule(&boss, &id),
+        Err(Ok(Error::NotPaused))
+    );
+    // A cancelled schedule cannot be disbursed, even when long overdue.
+    advance(&s, 3 * MONTH);
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotActive)));
+    assert_eq!(
+        s.client.disburse_batch(&soroban_sdk::vec![&s.env, id]),
+        soroban_sdk::vec![&s.env, false]
+    );
+    // The escrow is untouched by the cancellation and can be withdrawn.
+    assert_eq!(s.client.escrow_of(&boss), 1_000 * USDC);
+    s.client.withdraw_escrow(&boss, &(1_000 * USDC));
+
+    // Cancel from Paused is allowed too.
+    let (boss2, _, id2) = funded_schedule(&s, 0, USDC);
+    s.client.pause_schedule(&boss2, &id2);
+    s.client.cancel_schedule(&boss2, &id2);
+    assert_eq!(status_of(&s, id2), ScheduleStatus::Cancelled);
+}
+
+#[test]
+fn employers_keep_control_while_the_contract_is_paused() {
+    let s = setup();
+    let (boss, _staff, a) = funded_schedule(&s, 100 * USDC, USDC);
+    let staff_b = Address::generate(&s.env);
+    let b = s
+        .client
+        .create_schedules(
+            &boss,
+            &soroban_sdk::vec![&s.env, input(&s, &staff_b, USDC, MONTH, "b")],
+            &now(&s),
+        )
+        .get(0)
+        .unwrap();
+    s.client.pause_schedule(&boss, &b);
+
+    s.client.pause();
+    s.client.pause_schedule(&boss, &a);
+    s.client.resume_schedule(&boss, &a);
+    s.client.cancel_schedule(&boss, &a);
+    s.client.resume_schedule(&boss, &b);
+    s.client.cancel_schedule(&boss, &b);
+    s.client.withdraw_escrow(&boss, &(100 * USDC));
+    assert_eq!(status_of(&s, a), ScheduleStatus::Cancelled);
+    assert_eq!(status_of(&s, b), ScheduleStatus::Cancelled);
+    assert_eq!(s.client.escrow_of(&boss), 0);
+    s.client.unpause();
+}

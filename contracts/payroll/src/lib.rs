@@ -246,6 +246,80 @@ impl PayrollContract {
         Ok(ids)
     }
 
+    /// Pause schedule `schedule_id`: it is not disbursed until resumed.
+    /// Periods that fall due meanwhile stay owed (`next_due` is not moved).
+    /// Allowed while the contract is paused.
+    ///
+    /// Auth: `employer`, who must own the schedule.
+    /// Errors: `ScheduleNotFound`, `NotEmployer`, `NotActive`.
+    /// Events: `schedule_paused`.
+    pub fn pause_schedule(env: Env, employer: Address, schedule_id: u64) -> Result<(), Error> {
+        employer.require_auth();
+        let mut schedule = owned_schedule(&env, &employer, schedule_id)?;
+        if schedule.status != ScheduleStatus::Active {
+            return Err(Error::NotActive);
+        }
+        storage::extend_instance(&env);
+        schedule.status = ScheduleStatus::Paused;
+        storage::set_schedule(&env, &schedule);
+        events::SchedulePaused {
+            employer,
+            schedule_id,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Resume a paused schedule. `next_due` is kept as it was: owed salary
+    /// stays owed and is caught up one period per `disburse` call. Allowed
+    /// while the contract is paused.
+    ///
+    /// Auth: `employer`, who must own the schedule.
+    /// Errors: `ScheduleNotFound`, `NotEmployer`, `NotPaused`.
+    /// Events: `schedule_resumed`.
+    pub fn resume_schedule(env: Env, employer: Address, schedule_id: u64) -> Result<(), Error> {
+        employer.require_auth();
+        let mut schedule = owned_schedule(&env, &employer, schedule_id)?;
+        if schedule.status != ScheduleStatus::Paused {
+            return Err(Error::NotPaused);
+        }
+        storage::extend_instance(&env);
+        schedule.status = ScheduleStatus::Active;
+        storage::set_schedule(&env, &schedule);
+        events::ScheduleResumed {
+            employer,
+            schedule_id,
+            next_due: schedule.next_due,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancel an `Active` or `Paused` schedule. Final: it can never be
+    /// disbursed or resumed again. The employer's escrow is untouched (it is
+    /// shared by all their schedules) and can be withdrawn with
+    /// `withdraw_escrow`. Allowed while the contract is paused.
+    ///
+    /// Auth: `employer`, who must own the schedule.
+    /// Errors: `ScheduleNotFound`, `NotEmployer`, `AlreadyCancelled`.
+    /// Events: `schedule_cancelled`.
+    pub fn cancel_schedule(env: Env, employer: Address, schedule_id: u64) -> Result<(), Error> {
+        employer.require_auth();
+        let mut schedule = owned_schedule(&env, &employer, schedule_id)?;
+        if schedule.status == ScheduleStatus::Cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+        storage::extend_instance(&env);
+        schedule.status = ScheduleStatus::Cancelled;
+        storage::set_schedule(&env, &schedule);
+        events::ScheduleCancelled {
+            employer,
+            schedule_id,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     // ---- disbursing (permissionless, time-gated) ---------------------------
 
     /// Pay one period of schedule `schedule_id`, if it is due.
@@ -476,6 +550,15 @@ fn require_valid_period(period: u64) -> Result<(), Error> {
         return Err(Error::InvalidPeriod);
     }
     Ok(())
+}
+
+/// The schedule `schedule_id`, which must belong to `employer`.
+fn owned_schedule(env: &Env, employer: &Address, schedule_id: u64) -> Result<Schedule, Error> {
+    let schedule = storage::get_schedule(env, schedule_id).ok_or(Error::ScheduleNotFound)?;
+    if schedule.employer != *employer {
+        return Err(Error::NotEmployer);
+    }
+    Ok(schedule)
 }
 
 /// `amount * fee_bps / 10_000`, rounded down.
