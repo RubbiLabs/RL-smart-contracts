@@ -4,7 +4,7 @@
 //! events about a subscriber or merchant carry that address as the second
 //! topic, so an indexer can filter by contract + event name + address.
 
-use soroban_sdk::{contractevent, Address, BytesN, String};
+use soroban_sdk::{contractevent, Address, BytesN, String, Symbol};
 
 /// `merchant_added`: the admin allowlisted `merchant`, paying out to
 /// `payout`.
@@ -45,6 +45,60 @@ pub struct PlanActiveSet {
     pub merchant: Address,
     pub plan_id: u32,
     pub active: bool,
+}
+
+/// `subscribed`: `subscriber` subscribed to `plan_id` as subscription
+/// `sub_id`; the first period was charged (see the `charged` event emitted
+/// in the same call) and the next charge is due at `next_due`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Subscribed {
+    #[topic]
+    pub subscriber: Address,
+    pub sub_id: u64,
+    pub plan_id: u32,
+    pub next_due: u64,
+}
+
+/// `charged`: `amount` was pulled from `subscriber` for subscription
+/// `sub_id`; `merchant` received `amount - fee` and the fee recipient
+/// `fee`. The next charge is due at `next_due`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Charged {
+    #[topic]
+    pub subscriber: Address,
+    pub sub_id: u64,
+    pub plan_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub fee: i128,
+    pub next_due: u64,
+}
+
+/// `charge_failed`: pulling `amount` from `subscriber` for subscription
+/// `sub_id` failed (allowance or balance); the subscription is now
+/// `PastDue`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChargeFailed {
+    #[topic]
+    pub subscriber: Address,
+    pub sub_id: u64,
+    pub plan_id: u32,
+    pub amount: i128,
+}
+
+/// `charge_skipped`: subscription `sub_id` was due but not charged, and its
+/// state was left unchanged. `reason` is currently always
+/// `merchant_inactive`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChargeSkipped {
+    #[topic]
+    pub subscriber: Address,
+    pub sub_id: u64,
+    pub reason: Symbol,
 }
 
 /// `fee_set`: the admin changed the fee to `fee_bps` basis points.

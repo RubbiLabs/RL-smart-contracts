@@ -31,7 +31,8 @@ mod storage;
 mod test;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, ContractExecutable, Env, String,
+    contract, contractimpl, contracttype, token, Address, BytesN, ContractExecutable, Env, String,
+    Symbol, Vec,
 };
 
 pub use errors::Error;
@@ -71,6 +72,33 @@ pub struct Plan {
     pub amount: i128,
     pub period: u64,
     pub active: bool,
+}
+
+/// Lifecycle state of a subscription.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubStatus {
+    /// Charged every period.
+    Active,
+    /// Paused by the subscriber; not charged until resumed.
+    Paused,
+    /// The last charge failed; retried by the next `charge` call.
+    PastDue,
+    /// Cancelled by the subscriber. Final.
+    Cancelled,
+}
+
+/// A subscription of `subscriber` to `plan_id`. No personal data is stored.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Subscription {
+    pub id: u64,
+    pub subscriber: Address,
+    pub plan_id: u32,
+    /// Ledger timestamp (seconds) from which the next charge is allowed.
+    pub next_due: u64,
+    pub status: SubStatus,
+    pub created_at: u64,
 }
 
 /// The subscriptions contract.
@@ -222,6 +250,132 @@ impl SubscriptionsContract {
         Ok(())
     }
 
+    // ---- subscriptions (subscriber) ----------------------------------------
+
+    /// Subscribe `subscriber` to `plan_id` and return the new subscription
+    /// id. The first period is charged immediately by pulling `plan.amount`
+    /// from the subscriber's wallet (this contract must hold a sufficient
+    /// token allowance as spender); `next_due` becomes `now + period`.
+    ///
+    /// If the pull fails, the whole call fails with `PaymentFailed` and no
+    /// subscription is created.
+    ///
+    /// Auth: `subscriber`.
+    /// Errors: `Paused`, `PlanNotFound`, `PlanInactive`, `MerchantNotFound`,
+    /// `MerchantInactive`, `AlreadySubscribed` (a non-cancelled subscription
+    /// to this plan exists), `PaymentFailed`, `Overflow`.
+    /// Events: `subscribed`, then `charged`.
+    pub fn subscribe(env: Env, subscriber: Address, plan_id: u32) -> Result<u64, Error> {
+        subscriber.require_auth();
+        require_not_paused(&env)?;
+        let plan = storage::get_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
+        if !plan.active {
+            return Err(Error::PlanInactive);
+        }
+        let merchant = require_active_merchant(&env, &plan.merchant)?;
+        if storage::get_sub_id_of(&env, &subscriber, plan_id).is_some() {
+            return Err(Error::AlreadySubscribed);
+        }
+        storage::extend_instance(&env);
+
+        let fee = fee_for(&env, plan.amount)?;
+        let now = env.ledger().timestamp();
+        let next_due = now.checked_add(plan.period).ok_or(Error::Overflow)?;
+
+        // Interaction first: the subscription only exists if the first
+        // period was actually paid. A failed call rolls everything back.
+        if pull(&env, &subscriber, plan.amount).is_err() {
+            return Err(Error::PaymentFailed);
+        }
+
+        let id = storage::next_sub_id(&env);
+        storage::set_subscription(
+            &env,
+            &Subscription {
+                id,
+                subscriber: subscriber.clone(),
+                plan_id,
+                next_due,
+                status: SubStatus::Active,
+                created_at: now,
+            },
+        );
+        storage::set_sub_id_of(&env, &subscriber, plan_id, id);
+
+        pay_out(&env, &merchant.payout, plan.amount, fee);
+
+        events::Subscribed {
+            subscriber: subscriber.clone(),
+            sub_id: id,
+            plan_id,
+            next_due,
+        }
+        .publish(&env);
+        events::Charged {
+            subscriber,
+            sub_id: id,
+            plan_id,
+            merchant: plan.merchant,
+            amount: plan.amount,
+            fee,
+            next_due,
+        }
+        .publish(&env);
+        Ok(id)
+    }
+
+    // ---- charging (permissionless, time-gated) -----------------------------
+
+    /// Charge one period of subscription `sub_id`, if it is due.
+    ///
+    /// Requires status `Active` or `PastDue` and `now >= next_due`. The plan
+    /// amount is pulled from the subscriber in one `transfer_from`; on
+    /// success the merchant receives `amount - fee`, the fee recipient
+    /// `fee`, the status becomes `Active` and `next_due` advances by one
+    /// period (if that is still in the past, to `now + period`: a subscriber
+    /// who was past due for three months is charged once, not three times).
+    ///
+    /// Returns `false` without changing `next_due` in two cases:
+    /// - the pull failed (allowance or balance): status becomes `PastDue`
+    ///   and `charge_failed` is emitted;
+    /// - the plan's merchant is inactive: nothing is pulled, nothing is
+    ///   written, `charge_skipped` is emitted. Charging resumes when the
+    ///   admin reactivates the merchant.
+    ///
+    /// Auth: none (permissionless).
+    /// Errors: `Paused`, `SubscriptionNotFound`, `NotChargeable` (paused or
+    /// cancelled), `NotDue`, `PlanNotFound`, `MerchantNotFound`, `Overflow`.
+    /// Events: `charged`, `charge_failed` or `charge_skipped`.
+    pub fn charge(env: Env, sub_id: u64) -> Result<bool, Error> {
+        require_not_paused(&env)?;
+        storage::extend_instance(&env);
+        charge_one(&env, sub_id)
+    }
+
+    /// Charge every subscription in `sub_ids` that is due. Returns one
+    /// `bool` per input id, in order: `true` when a period was charged,
+    /// `false` when the item was skipped for any per-item reason (not due,
+    /// not chargeable, unknown id, inactive merchant) or its pull failed
+    /// (status set to `PastDue`, as in `charge`).
+    ///
+    /// Auth: none (permissionless).
+    /// Errors: `BatchTooLarge` (> 25 ids), `Paused`. Per-item errors never
+    /// fail the batch.
+    /// Events: as `charge`, per item.
+    pub fn charge_batch(env: Env, sub_ids: Vec<u64>) -> Result<Vec<bool>, Error> {
+        if sub_ids.len() > MAX_BATCH {
+            return Err(Error::BatchTooLarge);
+        }
+        require_not_paused(&env)?;
+        storage::extend_instance(&env);
+
+        let mut results = Vec::new(&env);
+        for sub_id in sub_ids.iter() {
+            results.push_back(charge_one(&env, sub_id).unwrap_or(false));
+        }
+        Ok(results)
+    }
+
     // ---- admin: fees -------------------------------------------------------
 
     /// Set the fee taken from every charge, in basis points.
@@ -338,6 +492,17 @@ impl SubscriptionsContract {
         storage::get_plan(&env, plan_id).ok_or(Error::PlanNotFound)
     }
 
+    /// Subscription by id. Auth: none. Errors: `SubscriptionNotFound`.
+    pub fn get_subscription(env: Env, sub_id: u64) -> Result<Subscription, Error> {
+        storage::get_subscription(&env, sub_id).ok_or(Error::SubscriptionNotFound)
+    }
+
+    /// Id of `subscriber`'s non-cancelled subscription to `plan_id`, if
+    /// any. Auth: none.
+    pub fn sub_id_of(env: Env, subscriber: Address, plan_id: u32) -> Option<u64> {
+        storage::get_sub_id_of(&env, &subscriber, plan_id)
+    }
+
     /// Current admin. Auth: none.
     pub fn admin(env: Env) -> Address {
         storage::get_admin(&env)
@@ -378,6 +543,13 @@ fn require_fee_in_range(fee_bps: u32) -> Result<(), Error> {
     Ok(())
 }
 
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    if storage::is_paused(env) {
+        return Err(Error::Paused);
+    }
+    Ok(())
+}
+
 fn require_positive(amount: i128) -> Result<(), Error> {
     if amount <= 0 {
         return Err(Error::InvalidAmount);
@@ -399,4 +571,106 @@ fn require_active_merchant(env: &Env, merchant: &Address) -> Result<Merchant, Er
         return Err(Error::MerchantInactive);
     }
     Ok(record)
+}
+
+/// `amount * fee_bps / 10_000`, rounded down.
+fn fee_for(env: &Env, amount: i128) -> Result<i128, Error> {
+    let fee = amount
+        .checked_mul(i128::from(storage::get_fee_bps(env)))
+        .ok_or(Error::Overflow)?
+        / BPS_DENOMINATOR;
+    Ok(fee)
+}
+
+/// Pull `amount` from `from` into this contract using the allowance `from`
+/// granted to this contract. Never panics: a failed `transfer_from` (no or
+/// expired allowance, insufficient balance) is returned as `Err`.
+fn pull(env: &Env, from: &Address, amount: i128) -> Result<(), ()> {
+    let this = env.current_contract_address();
+    token::TokenClient::new(env, &storage::get_token(env))
+        .try_transfer_from(&this, from, &this, &amount)
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
+/// Pay `amount - fee` to `payout` and `fee` to the fee recipient out of the
+/// tokens this contract just pulled.
+fn pay_out(env: &Env, payout: &Address, amount: i128, fee: i128) {
+    let token = token::TokenClient::new(env, &storage::get_token(env));
+    let this = env.current_contract_address();
+    token.transfer(&this, payout, &(amount - fee));
+    if fee > 0 {
+        token.transfer(&this, storage::get_fee_recipient(env), &fee);
+    }
+}
+
+/// No back-charging: advance by one period; if that is still not in the
+/// future, restart from `now`.
+fn advance_next_due(next_due: u64, period: u64, now: u64) -> Result<u64, Error> {
+    let advanced = next_due.checked_add(period).ok_or(Error::Overflow)?;
+    if advanced <= now {
+        return now.checked_add(period).ok_or(Error::Overflow);
+    }
+    Ok(advanced)
+}
+
+/// The body of `charge` for one subscription, without the pause check.
+fn charge_one(env: &Env, sub_id: u64) -> Result<bool, Error> {
+    let mut sub = storage::get_subscription(env, sub_id).ok_or(Error::SubscriptionNotFound)?;
+    if !matches!(sub.status, SubStatus::Active | SubStatus::PastDue) {
+        return Err(Error::NotChargeable);
+    }
+    let now = env.ledger().timestamp();
+    if now < sub.next_due {
+        return Err(Error::NotDue);
+    }
+    let plan = storage::get_plan(env, sub.plan_id).ok_or(Error::PlanNotFound)?;
+    let merchant = storage::get_merchant(env, &plan.merchant).ok_or(Error::MerchantNotFound)?;
+
+    if !merchant.active {
+        events::ChargeSkipped {
+            subscriber: sub.subscriber,
+            sub_id,
+            reason: Symbol::new(env, "merchant_inactive"),
+        }
+        .publish(env);
+        return Ok(false);
+    }
+
+    let fee = fee_for(env, plan.amount)?;
+    let next_due = advance_next_due(sub.next_due, plan.period, now)?;
+
+    // The outcome of the pull decides the new state, so state is written
+    // after it is known. A failed pull is rolled back by the host and
+    // leaves the tokens untouched.
+    if pull(env, &sub.subscriber, plan.amount).is_err() {
+        sub.status = SubStatus::PastDue;
+        storage::set_subscription(env, &sub);
+        events::ChargeFailed {
+            subscriber: sub.subscriber,
+            sub_id,
+            plan_id: sub.plan_id,
+            amount: plan.amount,
+        }
+        .publish(env);
+        return Ok(false);
+    }
+
+    sub.status = SubStatus::Active;
+    sub.next_due = next_due;
+    storage::set_subscription(env, &sub);
+
+    pay_out(env, &merchant.payout, plan.amount, fee);
+
+    events::Charged {
+        subscriber: sub.subscriber,
+        sub_id,
+        plan_id: sub.plan_id,
+        merchant: plan.merchant,
+        amount: plan.amount,
+        fee,
+        next_due,
+    }
+    .publish(env);
+    Ok(true)
 }

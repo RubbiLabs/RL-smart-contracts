@@ -12,7 +12,7 @@
 
 use soroban_sdk::{contracttype, Address, Env};
 
-use crate::{Merchant, Plan};
+use crate::{Merchant, Plan, Subscription};
 
 /// Ledgers per day. Stellar closes a ledger roughly every 5 seconds
 /// (measured on 2026-10-27 over 100 consecutive ledgers on both testnet and
@@ -48,10 +48,17 @@ pub enum DataKey {
     Paused,
     /// Next plan id to assign; ids start at 1 (instance).
     NextPlanId,
+    /// Next subscription id to assign; ids start at 1 (instance).
+    NextSubId,
     /// An allowlisted merchant (persistent).
     Merchant(Address),
     /// A plan by id (persistent).
     Plan(u32),
+    /// A subscription by id (persistent).
+    Subscription(u64),
+    /// Index: the non-cancelled subscription of (subscriber, plan id), if
+    /// any (persistent). Removed when the subscription is cancelled.
+    SubOf(Address, u32),
 }
 
 /// Extend the TTL of the contract instance and code.
@@ -171,6 +178,17 @@ pub fn next_plan_id(env: &Env) -> u32 {
     id
 }
 
+/// Allocate the next subscription id (starting at 1).
+pub fn next_sub_id(env: &Env) -> u64 {
+    let id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextSubId)
+        .unwrap_or(1);
+    env.storage().instance().set(&DataKey::NextSubId, &(id + 1));
+    id
+}
+
 // ---- persistent: merchants and plans ---------------------------------------
 
 pub fn get_merchant(env: &Env, merchant: &Address) -> Option<Merchant> {
@@ -187,4 +205,23 @@ pub fn get_plan(env: &Env, plan_id: u32) -> Option<Plan> {
 
 pub fn set_plan(env: &Env, plan: &Plan) {
     set_persistent(env, &DataKey::Plan(plan.id), plan);
+}
+
+// ---- persistent: subscriptions ---------------------------------------------
+
+pub fn get_subscription(env: &Env, sub_id: u64) -> Option<Subscription> {
+    get_persistent(env, &DataKey::Subscription(sub_id))
+}
+
+pub fn set_subscription(env: &Env, sub: &Subscription) {
+    set_persistent(env, &DataKey::Subscription(sub.id), sub);
+}
+
+/// The subscriber's non-cancelled subscription to `plan_id`, if any.
+pub fn get_sub_id_of(env: &Env, subscriber: &Address, plan_id: u32) -> Option<u64> {
+    get_persistent(env, &DataKey::SubOf(subscriber.clone(), plan_id))
+}
+
+pub fn set_sub_id_of(env: &Env, subscriber: &Address, plan_id: u32, sub_id: u64) {
+    set_persistent(env, &DataKey::SubOf(subscriber.clone(), plan_id), &sub_id);
 }
