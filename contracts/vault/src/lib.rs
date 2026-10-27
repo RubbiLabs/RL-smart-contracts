@@ -22,7 +22,7 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, Address, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, Env};
 
 pub use errors::Error;
 
@@ -57,7 +57,61 @@ impl VaultContract {
         storage::extend_instance(&env);
     }
 
+    // ---- user funds --------------------------------------------------------
+
+    /// Deposit `amount` of the vault token from `user` into their vault
+    /// balance.
+    ///
+    /// Auth: `user`.
+    /// Errors: `InvalidAmount` (amount <= 0), `Paused`, `Overflow`.
+    /// Events: `deposit`.
+    pub fn deposit(env: Env, user: Address, amount: i128) -> Result<(), Error> {
+        user.require_auth();
+        require_positive(amount)?;
+        require_not_paused(&env)?;
+        storage::extend_instance(&env);
+
+        credit(&env, &user, amount)?;
+
+        token::TokenClient::new(&env, &storage::get_token(&env)).transfer(
+            &user,
+            env.current_contract_address(),
+            &amount,
+        );
+
+        events::Deposit { user, amount }.publish(&env);
+        Ok(())
+    }
+
+    /// Withdraw `amount` from `user`'s vault balance back to their wallet.
+    /// Allowed while the vault is paused.
+    ///
+    /// Auth: `user`.
+    /// Errors: `InvalidAmount` (amount <= 0), `InsufficientBalance`.
+    /// Events: `withdraw`.
+    pub fn withdraw(env: Env, user: Address, amount: i128) -> Result<(), Error> {
+        user.require_auth();
+        require_positive(amount)?;
+        storage::extend_instance(&env);
+
+        debit(&env, &user, amount)?;
+
+        token::TokenClient::new(&env, &storage::get_token(&env)).transfer(
+            &env.current_contract_address(),
+            user.clone(),
+            &amount,
+        );
+
+        events::Withdraw { user, amount }.publish(&env);
+        Ok(())
+    }
+
     // ---- reads -------------------------------------------------------------
+
+    /// `user`'s vault balance. Auth: none.
+    pub fn balance(env: Env, user: Address) -> i128 {
+        storage::get_balance(&env, &user)
+    }
 
     /// Current admin. Auth: none.
     pub fn admin(env: Env) -> Address {
@@ -94,4 +148,47 @@ impl VaultContract {
     pub fn total_balances(env: Env) -> i128 {
         storage::get_total_balances(&env)
     }
+}
+
+// ---- internal helpers --------------------------------------------------------
+
+fn require_positive(amount: i128) -> Result<(), Error> {
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+    Ok(())
+}
+
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    if storage::is_paused(env) {
+        return Err(Error::Paused);
+    }
+    Ok(())
+}
+
+/// Add `amount` to `user`'s balance and to the running total.
+fn credit(env: &Env, user: &Address, amount: i128) -> Result<(), Error> {
+    let balance = storage::get_balance(env, user)
+        .checked_add(amount)
+        .ok_or(Error::Overflow)?;
+    let total = storage::get_total_balances(env)
+        .checked_add(amount)
+        .ok_or(Error::Overflow)?;
+    storage::set_balance(env, user, balance);
+    storage::set_total_balances(env, total);
+    Ok(())
+}
+
+/// Remove `amount` from `user`'s balance and from the running total.
+fn debit(env: &Env, user: &Address, amount: i128) -> Result<(), Error> {
+    let balance = storage::get_balance(env, user);
+    if balance < amount {
+        return Err(Error::InsufficientBalance);
+    }
+    let total = storage::get_total_balances(env)
+        .checked_sub(amount)
+        .ok_or(Error::Overflow)?;
+    storage::set_balance(env, user, balance - amount);
+    storage::set_total_balances(env, total);
+    Ok(())
 }
