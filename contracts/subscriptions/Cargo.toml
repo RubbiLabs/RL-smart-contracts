@@ -10,6 +10,12 @@ license = "MIT"
 crate-type = ["lib", "cdylib"]
 doctest = false
 
+[features]
+# Enables the positive upgrade-path test, which uploads the contract's own
+# wasm (target/wasm32v1-none/release/rubbi_subscriptions.wasm). Run
+# `stellar contract build` first.
+wasm-upgrade-test = []
+
 [dependencies]
 soroban-sdk = { workspace = true }
 

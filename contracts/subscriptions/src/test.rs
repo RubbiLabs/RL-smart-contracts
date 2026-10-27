@@ -1422,3 +1422,398 @@ fn subscribers_keep_control_while_the_contract_is_paused() {
     assert_eq!(status_of(&s, b), SubStatus::Cancelled);
     s.client.unpause();
 }
+
+// ---- admin two-step transfer -----------------------------------------------------
+
+#[test]
+fn admin_two_step_transfer() {
+    let s = setup();
+    s.env.mock_all_auths();
+    let new_admin = Address::generate(&s.env);
+
+    assert_eq!(s.client.try_accept_admin(), Err(Ok(Error::NoPendingAdmin)));
+
+    s.client.propose_admin(&new_admin);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "propose_admin",
+            (new_admin.clone(),).into_val(&s.env)
+        )
+    );
+    assert_eq!(s.client.pending_admin(), Some(new_admin.clone()));
+    assert_eq!(s.client.admin(), s.admin);
+
+    // Neither the old admin nor a stranger can accept for the proposed admin.
+    for signer in [&s.admin, &Address::generate(&s.env)] {
+        mock_auth_for(&s, signer, "accept_admin", ().into_val(&s.env));
+        assert!(matches!(s.client.try_accept_admin(), Err(Err(_))));
+    }
+
+    mock_auth_for(&s, &new_admin, "accept_admin", ().into_val(&s.env));
+    s.client.accept_admin();
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(&s, &new_admin, "accept_admin", ().into_val(&s.env))
+    );
+    assert_eq!(s.client.admin(), new_admin);
+    assert_eq!(s.client.pending_admin(), None);
+
+    // The old admin lost its rights; the new admin has them.
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "add_merchant",
+        (merchant.clone(), payout.clone()).into_val(&s.env),
+    );
+    assert!(matches!(
+        s.client.try_add_merchant(&merchant, &payout),
+        Err(Err(_))
+    ));
+    mock_auth_for(
+        &s,
+        &new_admin,
+        "add_merchant",
+        (merchant.clone(), payout.clone()).into_val(&s.env),
+    );
+    s.client.add_merchant(&merchant, &payout);
+    s.env.mock_all_auths();
+    assert!(s.client.get_merchant(&merchant).is_some());
+}
+
+// ---- fee recipient rotation --------------------------------------------------------
+
+#[test]
+fn set_fee_recipient_redirects_future_fees() {
+    let s = setup();
+    let (_merchant, _payout, plan_id) = merchant_with_plan(&s, 100 * USDC);
+    let user = subscriber(&s, 1_000 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+    assert_eq!(s.token.balance(&s.fee_recipient), fee);
+
+    let new_recipient = Address::generate(&s.env);
+    s.client.set_fee_recipient(&new_recipient);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "set_fee_recipient",
+            (new_recipient.clone(),).into_val(&s.env)
+        )
+    );
+    assert_eq!(s.client.fee_recipient(), new_recipient);
+
+    advance(&s, MONTH);
+    assert!(s.client.charge(&sub_id));
+    assert_eq!(s.token.balance(&s.fee_recipient), fee);
+    assert_eq!(s.token.balance(&new_recipient), fee);
+}
+
+// ---- every state change emits its event -----------------------------------------------
+
+#[test]
+fn every_state_change_emits_its_event() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+    let new_recipient = Address::generate(&s.env);
+    let new_admin = Address::generate(&s.env);
+    let user = subscriber(&s, 1_000 * USDC);
+    let plan_name = name(&s, "Basic");
+    s.env.mock_all_auths();
+
+    macro_rules! expect_event {
+        ($call:expr, $event:expr) => {
+            $call;
+            assert_eq!(last_events(&s), [$event.to_xdr(&s.env, &s.contract)]);
+        };
+    }
+
+    expect_event!(
+        s.client.add_merchant(&merchant, &payout),
+        events::MerchantAdded {
+            merchant: merchant.clone(),
+            payout: payout.clone(),
+        }
+    );
+    expect_event!(
+        s.client.set_merchant_active(&merchant, &false),
+        events::MerchantActiveSet {
+            merchant: merchant.clone(),
+            active: false,
+        }
+    );
+    s.client.set_merchant_active(&merchant, &true);
+    expect_event!(
+        s.client
+            .create_plan(&merchant, &plan_name, &(10 * USDC), &MONTH),
+        events::PlanCreated {
+            merchant: merchant.clone(),
+            plan_id: 1,
+            name: plan_name.clone(),
+            amount: 10 * USDC,
+            period: MONTH,
+        }
+    );
+    expect_event!(
+        s.client.set_plan_active(&merchant, &1, &false),
+        events::PlanActiveSet {
+            merchant: merchant.clone(),
+            plan_id: 1,
+            active: false,
+        }
+    );
+    s.client.set_plan_active(&merchant, &1, &true);
+
+    // subscribe emits two events: subscribed, then charged.
+    s.client.subscribe(&user, &1);
+    assert_eq!(
+        last_events(&s),
+        [
+            events::Subscribed {
+                subscriber: user.clone(),
+                sub_id: 1,
+                plan_id: 1,
+                next_due: START + MONTH,
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::Charged {
+                subscriber: user.clone(),
+                sub_id: 1,
+                plan_id: 1,
+                merchant: merchant.clone(),
+                amount: 10 * USDC,
+                fee: 10 * USDC * FEE_BPS as i128 / 10_000,
+                next_due: START + MONTH,
+            }
+            .to_xdr(&s.env, &s.contract),
+        ]
+    );
+    advance(&s, MONTH);
+    expect_event!(
+        assert!(s.client.charge(&1)),
+        events::Charged {
+            subscriber: user.clone(),
+            sub_id: 1,
+            plan_id: 1,
+            merchant: merchant.clone(),
+            amount: 10 * USDC,
+            fee: 10 * USDC * FEE_BPS as i128 / 10_000,
+            next_due: START + 2 * MONTH,
+        }
+    );
+    advance(&s, MONTH);
+    s.token.approve(&user, &s.contract, &0, &0);
+    expect_event!(
+        assert!(!s.client.charge(&1)),
+        events::ChargeFailed {
+            subscriber: user.clone(),
+            sub_id: 1,
+            plan_id: 1,
+            amount: 10 * USDC,
+        }
+    );
+    s.client.set_merchant_active(&merchant, &false);
+    expect_event!(
+        assert!(!s.client.charge(&1)),
+        events::ChargeSkipped {
+            subscriber: user.clone(),
+            sub_id: 1,
+            reason: Symbol::new(&s.env, "merchant_inactive"),
+        }
+    );
+    s.client.set_merchant_active(&merchant, &true);
+    expect_event!(
+        s.client.pause_subscription(&user, &1),
+        events::SubscriptionPaused {
+            subscriber: user.clone(),
+            sub_id: 1,
+        }
+    );
+    expect_event!(
+        s.client.resume_subscription(&user, &1),
+        events::SubscriptionResumed {
+            subscriber: user.clone(),
+            sub_id: 1,
+            next_due: now(&s),
+        }
+    );
+    expect_event!(
+        s.client.cancel_subscription(&user, &1),
+        events::SubscriptionCancelled {
+            subscriber: user.clone(),
+            sub_id: 1,
+        }
+    );
+    expect_event!(s.client.set_fee(&10), events::FeeSet { fee_bps: 10 });
+    expect_event!(
+        s.client.set_fee_recipient(&new_recipient),
+        events::FeeRecipientSet {
+            fee_recipient: new_recipient.clone(),
+        }
+    );
+    expect_event!(s.client.pause(), events::Paused {});
+    expect_event!(s.client.unpause(), events::Unpaused {});
+    expect_event!(
+        s.client.propose_admin(&new_admin),
+        events::AdminProposed {
+            pending_admin: new_admin.clone(),
+        }
+    );
+    expect_event!(
+        s.client.accept_admin(),
+        events::AdminTransferred {
+            new_admin: new_admin.clone(),
+            old_admin: s.admin.clone(),
+        }
+    );
+
+    // Reads and rejected calls emit nothing.
+    s.client.get_plan(&1);
+    assert_eq!(last_events(&s).events().len(), 0);
+    assert!(s.client.try_charge(&1).is_err());
+    assert_eq!(last_events(&s).events().len(), 0);
+    assert!(s.client.try_subscribe(&user, &99).is_err());
+    assert_eq!(last_events(&s).events().len(), 0);
+}
+
+// ---- no PII on-chain (L6): enforced by the types ------------------------------------------
+
+/// The on-chain types carry no personal data. This is checked against the
+/// contract's own type spec (the XDR the SDK embeds in the wasm), so a field
+/// added to any of these types shows up here, and by exhaustive
+/// destructuring, which fails to compile if a field is added.
+#[test]
+fn on_chain_types_have_no_pii_fields() {
+    use soroban_sdk::xdr::{Limits, ReadXdr, ScSpecEntry};
+
+    fn field_names(spec: &[u8]) -> std::vec::Vec<std::string::String> {
+        match ScSpecEntry::from_xdr(spec, Limits::none()).unwrap() {
+            ScSpecEntry::UdtStructV0(st) => st
+                .fields
+                .iter()
+                .map(|f| f.name.to_utf8_string_lossy())
+                .collect(),
+            other => panic!("expected a struct spec, got {other:?}"),
+        }
+    }
+
+    // (The SDK sorts struct fields alphabetically in the spec.)
+    assert_eq!(field_names(&Merchant::spec_xdr()), ["active", "payout"]);
+    assert_eq!(
+        field_names(&Plan::spec_xdr()),
+        ["active", "amount", "id", "merchant", "name", "period"]
+    );
+    assert_eq!(
+        field_names(&Subscription::spec_xdr()),
+        [
+            "created_at",
+            "id",
+            "next_due",
+            "plan_id",
+            "status",
+            "subscriber"
+        ]
+    );
+
+    // Nothing that looks like personal data anywhere in the type specs.
+    for spec in [
+        Merchant::spec_xdr().as_slice(),
+        Plan::spec_xdr().as_slice(),
+        Subscription::spec_xdr().as_slice(),
+    ] {
+        for field in field_names(spec) {
+            for forbidden in ["email", "password", "phone", "user_name", "username", "pin"] {
+                assert!(
+                    !field.to_lowercase().contains(forbidden),
+                    "PII-looking field `{field}`"
+                );
+            }
+        }
+    }
+
+    // Exhaustive destructuring: adding a field breaks this test at compile
+    // time, forcing a conscious review.
+    let s = setup();
+    let (merchant, _payout, plan_id) = merchant_with_plan(&s, USDC);
+    let user = subscriber(&s, USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    let Merchant { payout, active } = s.client.get_merchant(&merchant).unwrap();
+    let _ = (payout, active);
+    let Plan {
+        id,
+        merchant: _,
+        name,
+        amount,
+        period,
+        active,
+    } = s.client.get_plan(&plan_id);
+    let _ = (id, name, amount, period, active);
+    let Subscription {
+        id,
+        subscriber,
+        plan_id,
+        next_due,
+        status,
+        created_at,
+    } = s.client.get_subscription(&sub_id);
+    let _ = (id, subscriber, plan_id, next_due, status, created_at);
+}
+
+// ---- upgrade -------------------------------------------------------------------------
+
+/// Positive upgrade path. Uploads this contract's own optimized wasm
+/// (built by `stellar contract build`) and upgrades to it, which exercises
+/// the full admin-authorized `update_current_contract` path.
+#[cfg(feature = "wasm-upgrade-test")]
+#[test]
+fn upgrade_by_admin_replaces_the_executable() {
+    const WASM: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/wasm32v1-none/release/rubbi_subscriptions.wasm"
+    ));
+    let s = setup();
+    let (_merchant, _payout, plan_id) = merchant_with_plan(&s, USDC);
+    let user = subscriber(&s, 100 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+
+    let wasm_hash = s
+        .env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&s.env, WASM));
+
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "upgrade",
+        (wasm_hash.clone(),).into_val(&s.env),
+    );
+    s.client.upgrade(&wasm_hash);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "upgrade",
+            (wasm_hash.clone(),).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.contract)]
+    );
+
+    // Storage survived and the (now wasm) contract still works.
+    s.env.mock_all_auths();
+    assert_eq!(s.client.admin(), s.admin);
+    assert_eq!(status_of(&s, sub_id), SubStatus::Active);
+    advance(&s, MONTH);
+    assert!(s.client.charge(&sub_id));
+    assert_eq!(s.token.balance(&user), 98 * USDC);
+}
