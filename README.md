@@ -32,12 +32,18 @@ for reference; the tag `v0-evm-arbitrum` holds the last buildable EVM state.
 |---|---|---|
 | `vault` | custodial (card funding) | users `deposit` / `withdraw`; the operator `settle_card_spend`; the treasury `credit_refund` |
 | `subscriptions` | non-custodial: funds stay in the subscriber's wallet behind a bounded, expiring SAC allowance | admin curates merchants; merchants create plans; subscribers `subscribe` / `pause_subscription` / `resume_subscription` / `cancel_subscription`; anyone may call the time-gated `charge` / `charge_batch` |
-| `payroll` | employer escrow | employers `fund` / `withdraw_escrow` / `create_schedules` / `pause_schedule` / `resume_schedule` / `cancel_schedule`; anyone may call the time-gated `disburse` / `disburse_batch` |
+| `payroll` | employer escrow | employers `fund` / `withdraw_escrow` / `create_schedules` (at most 25 per call) / `pause_schedule` / `resume_schedule` / `cancel_schedule`; anyone may call the time-gated `disburse` / `disburse_batch` |
 
 Fees (subscriptions and payroll): the payer always pays exactly the plan or
 schedule amount; the payee receives `amount - fee` and the fee recipient
 `fee = amount * fee_bps / 10_000` rounded down, with `fee_bps` capped at
 1_000 (10%).
+
+Batch functions (`charge_batch`, `disburse_batch`) and `create_schedules`
+accept at most 25 items per call. The cap on `create_schedules` keeps the
+per-schedule `schedule_created` events well inside the 16 KiB of contract
+events a transaction may emit; `schedule_created` carries no label (read it
+with `get_schedule`).
 
 Subscriptions never back-charge: a subscriber who was past due for three
 months is charged once. Payroll deliberately does back-pay: each `disburse`

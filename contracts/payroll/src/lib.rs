@@ -44,7 +44,11 @@ pub const BPS_DENOMINATOR: i128 = 10_000;
 /// Maximum number of items accepted by `disburse_batch`.
 pub const MAX_BATCH: u32 = 25;
 /// Maximum number of schedules created in one `create_schedules` call.
-pub const MAX_SCHEDULES_PER_CALL: u32 = 50;
+///
+/// Each schedule emits a `schedule_created` event and a transaction may
+/// emit at most 16 KiB of contract events; 25 schedules use about half of
+/// that, leaving headroom for future network-config changes.
+pub const MAX_SCHEDULES_PER_CALL: u32 = 25;
 /// Shortest allowed schedule period: one day, in seconds.
 pub const MIN_PERIOD: u64 = 86_400;
 /// Longest allowed schedule period: 366 days, in seconds.
@@ -178,14 +182,14 @@ impl PayrollContract {
 
     // ---- schedules (employer) ----------------------------------------------
 
-    /// Create up to 50 schedules for `employer`, all first due at
+    /// Create up to 25 schedules for `employer`, all first due at
     /// `first_due`, and return their ids in input order. Every input is
     /// validated before anything is written, so the call is atomic: one bad
     /// input creates no schedules at all. Escrow is not checked here; it is
     /// checked at each disbursement.
     ///
     /// Auth: `employer`.
-    /// Errors: `Paused`, `TooManySchedules` (> 50 inputs), `FirstDueInPast`
+    /// Errors: `Paused`, `TooManySchedules` (> 25 inputs), `FirstDueInPast`
     /// (`first_due < now`), `InvalidAmount` (<= 0), `InvalidPeriod` (outside
     /// 1..=366 days), `LabelTooLong` (> 64 bytes).
     /// Events: one `schedule_created` per schedule.

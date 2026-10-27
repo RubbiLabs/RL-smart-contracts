@@ -28,7 +28,7 @@ pub enum Error {
     LabelTooLong = 5,
     /// The employer's escrow is smaller than the requested withdrawal.
     InsufficientEscrow = 6,
-    /// `create_schedules` was called with more than 50 inputs.
+    /// `create_schedules` was called with more than 25 inputs.
     TooManySchedules = 7,
     /// `first_due` is in the past.
     FirstDueInPast = 8,

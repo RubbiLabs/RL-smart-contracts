@@ -647,6 +647,7 @@ fn create_schedules_is_atomic_on_invalid_input() {
     for _ in 0..=MAX_SCHEDULES_PER_CALL {
         too_many.push_back(ok.clone());
     }
+    assert_eq!(too_many.len(), 26);
     assert_eq!(
         s.client.try_create_schedules(&boss, &too_many, &first_due),
         Err(Ok(Error::TooManySchedules))
@@ -663,12 +664,14 @@ fn create_schedules_is_atomic_on_invalid_input() {
         Err(Ok(Error::ScheduleNotFound))
     );
 
-    // Exactly the maximum is fine, and the rejected calls consumed no ids.
+    // 26 inputs were rejected above; exactly 25 is fine, and the rejected
+    // calls consumed no ids.
     too_many.pop_back();
+    assert_eq!(too_many.len(), 25);
     let ids = s.client.create_schedules(&boss, &too_many, &first_due);
     // The host enforces the network's per-transaction limits in tests, so
-    // this call also proves that 50 schedules (with maximum-length labels)
-    // fit in one transaction: 50 `schedule_created` events use ~15.6 KiB of
+    // this call also proves that 25 schedules (with maximum-length labels)
+    // fit in one transaction: 25 `schedule_created` events use ~7.8 KiB of
     // the 16 KiB contract-events budget.
     assert_eq!(ids.len(), MAX_SCHEDULES_PER_CALL);
     assert_eq!(ids.get(0), Some(1));
