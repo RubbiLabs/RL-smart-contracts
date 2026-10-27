@@ -1,0 +1,43 @@
+{
+  "network": "testnet",
+  "network_passphrase": "Test SDF Network ; September 2015",
+  "rpc_url": "https://soroban-testnet.stellar.org",
+  "usdc_issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  "usdc_sac": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+  "contracts": {
+    "vault": {
+      "contract_id": "C<vault contract id>",
+      "wasm_hash": "<sha-256 of rubbi_vault.wasm>",
+      "admin": "G<rubbi-admin>",
+      "operator": "G<rubbi-operator>",
+      "treasury": "G<rubbi-treasury>",
+      "token": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"
+    },
+    "subscriptions": {
+      "contract_id": "C<subscriptions contract id>",
+      "wasm_hash": "<sha-256 of rubbi_subscriptions.wasm>",
+      "admin": "G<rubbi-admin>",
+      "token": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      "fee_recipient": "G<rubbi-fees>",
+      "fee_bps": 50
+    },
+    "payroll": {
+      "contract_id": "C<payroll contract id>",
+      "wasm_hash": "<sha-256 of rubbi_payroll.wasm>",
+      "admin": "G<rubbi-admin>",
+      "token": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      "fee_recipient": "G<rubbi-fees>",
+      "fee_bps": 50
+    }
+  },
+  "roles": {
+    "admin": "G<rubbi-admin>",
+    "operator": "G<rubbi-operator>",
+    "treasury": "G<rubbi-treasury>",
+    "keeper": "G<rubbi-keeper>",
+    "fee_recipient": "G<rubbi-fees>"
+  },
+  "git_commit": "<commit the wasm was built from>",
+  "git_dirty": false,
+  "deployed_at": "<UTC ISO 8601, e.g. 2026-10-27T12:00:00Z>"
+}
