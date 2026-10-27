@@ -1,0 +1,17 @@
+[package]
+name = "rubbi-subscriptions"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Rubbi subscriptions: allowance-based recurring USDC payments on Soroban"
+license = "MIT"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
