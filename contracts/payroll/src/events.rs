@@ -30,7 +30,7 @@ pub struct EscrowWithdrawn {
 ///
 /// The label is deliberately not part of the event: a transaction may
 /// emit at most 16 KiB of contract events, and `create_schedules` emits one
-/// event per schedule for up to 50 schedules. Read it with `get_schedule`.
+/// event per schedule for up to 25 schedules. Read it with `get_schedule`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduleCreated {
