@@ -34,6 +34,12 @@ jobs:
           cargo --version
           stellar --version
 
+      - name: Shellcheck scripts
+        run: shellcheck scripts/*.sh
+
+      - name: README error tables match errors.rs
+        run: scripts/check-readme-errors.sh
+
       - name: Format
         run: cargo fmt --all --check
 
