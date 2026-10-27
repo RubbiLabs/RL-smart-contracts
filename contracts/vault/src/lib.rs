@@ -22,7 +22,7 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
 
 pub use errors::Error;
 
@@ -103,6 +103,88 @@ impl VaultContract {
         );
 
         events::Withdraw { user, amount }.publish(&env);
+        Ok(())
+    }
+
+    // ---- card settlement ---------------------------------------------------
+
+    /// Settle an off-chain card spend: move `amount` of `user`'s balance to
+    /// the treasury. `reference` (e.g. the hash of the issuer's transaction
+    /// id) makes the call idempotent: a reference can only be settled once.
+    ///
+    /// Auth: the stored operator.
+    /// Errors: `InvalidAmount` (amount <= 0), `Paused`, `DuplicateReference`,
+    /// `InsufficientBalance`, `Overflow`.
+    /// Events: `card_spend_settled`.
+    pub fn settle_card_spend(
+        env: Env,
+        user: Address,
+        amount: i128,
+        reference: BytesN<32>,
+    ) -> Result<(), Error> {
+        storage::get_operator(&env).require_auth();
+        require_positive(amount)?;
+        require_not_paused(&env)?;
+        if storage::has_spend_ref(&env, &reference) {
+            return Err(Error::DuplicateReference);
+        }
+        storage::extend_instance(&env);
+
+        debit(&env, &user, amount)?;
+        storage::set_spend_ref(&env, &reference);
+
+        token::TokenClient::new(&env, &storage::get_token(&env)).transfer(
+            &env.current_contract_address(),
+            storage::get_treasury(&env),
+            &amount,
+        );
+
+        events::CardSpendSettled {
+            user,
+            amount,
+            reference,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Credit a refund: pull `amount` from the treasury into the vault and
+    /// add it to `user`'s balance. `reference` is unique within refunds
+    /// (a separate namespace from spend references). Allowed while paused.
+    ///
+    /// Auth: the stored treasury.
+    /// Errors: `InvalidAmount` (amount <= 0), `DuplicateReference`,
+    /// `Overflow`.
+    /// Events: `refund_credited`.
+    pub fn credit_refund(
+        env: Env,
+        user: Address,
+        amount: i128,
+        reference: BytesN<32>,
+    ) -> Result<(), Error> {
+        let treasury = storage::get_treasury(&env);
+        treasury.require_auth();
+        require_positive(amount)?;
+        if storage::has_refund_ref(&env, &reference) {
+            return Err(Error::DuplicateReference);
+        }
+        storage::extend_instance(&env);
+
+        credit(&env, &user, amount)?;
+        storage::set_refund_ref(&env, &reference);
+
+        token::TokenClient::new(&env, &storage::get_token(&env)).transfer(
+            &treasury,
+            env.current_contract_address(),
+            &amount,
+        );
+
+        events::RefundCredited {
+            user,
+            amount,
+            reference,
+        }
+        .publish(&env);
         Ok(())
     }
 

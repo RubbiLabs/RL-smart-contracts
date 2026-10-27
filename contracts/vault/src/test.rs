@@ -9,7 +9,7 @@ use soroban_sdk::{
         MockAuthInvoke,
     },
     token::{StellarAssetClient, TokenClient},
-    Address, Env, Event as _, IntoVal,
+    Address, BytesN, Env, Event as _, IntoVal, Symbol,
 };
 
 use crate::{events, Error, VaultContract, VaultContractClient};
@@ -65,6 +65,11 @@ fn funded_user(s: &Setup, amount: i128) -> Address {
     s.env.mock_all_auths();
     s.token_admin.mint(&user, &amount);
     user
+}
+
+/// A deterministic 32-byte reference.
+fn reference(s: &Setup, seed: u8) -> BytesN<32> {
+    BytesN::from_array(&s.env, &[seed; 32])
 }
 
 /// The authorization tree the vault requires for `deposit(user, amount)`:
@@ -297,6 +302,268 @@ fn deposit_and_withdraw_emit_events() {
         [events::Withdraw {
             user: user.clone(),
             amount: 30,
+        }
+        .to_xdr(&s.env, &s.vault)]
+    );
+}
+
+// ---- 3. only the operator can settle (L1) -------------------------------------
+
+#[test]
+fn settle_requires_exact_operator_auth() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &100);
+    let r = reference(&s, 1);
+
+    s.client.settle_card_spend(&user, &40, &r);
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            s.operator.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    Symbol::new(&s.env, "settle_card_spend"),
+                    (user.clone(), 40_i128, r.clone()).into_val(&s.env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    assert_eq!(s.client.balance(&user), 60);
+    assert_eq!(s.client.total_balances(), 60);
+    assert_eq!(s.token.balance(&s.vault), 60);
+    assert_eq!(s.token.balance(&s.treasury), 40);
+}
+
+#[test]
+fn settle_by_non_operator_fails() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &100);
+    let r = reference(&s, 1);
+
+    // Neither the user themself, the admin, nor a stranger can settle.
+    for signer in [&user, &s.admin, &Address::generate(&s.env)] {
+        s.env.mock_auths(&[MockAuth {
+            address: signer,
+            invoke: &MockAuthInvoke {
+                contract: &s.vault,
+                fn_name: "settle_card_spend",
+                args: (user.clone(), 40_i128, r.clone()).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let res = s.client.try_settle_card_spend(&user, &40, &r);
+        assert!(matches!(res, Err(Err(_))), "expected a host auth error");
+    }
+
+    s.env.mock_all_auths();
+    assert_eq!(s.client.balance(&user), 100);
+    assert_eq!(s.token.balance(&s.treasury), 0);
+}
+
+// ---- 4. duplicate spend reference rejected ------------------------------------
+
+#[test]
+fn duplicate_spend_reference_is_rejected() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &100);
+    let r = reference(&s, 7);
+
+    s.client.settle_card_spend(&user, &10, &r);
+    assert_eq!(
+        s.client.try_settle_card_spend(&user, &10, &r),
+        Err(Ok(Error::DuplicateReference))
+    );
+    // Same reference, different user or amount: still a duplicate.
+    let other = funded_user(&s, 100);
+    s.client.deposit(&other, &100);
+    assert_eq!(
+        s.client.try_settle_card_spend(&other, &5, &r),
+        Err(Ok(Error::DuplicateReference))
+    );
+    // A fresh reference works.
+    s.client.settle_card_spend(&user, &10, &reference(&s, 8));
+
+    assert_eq!(s.client.balance(&user), 80);
+    assert_eq!(s.client.balance(&other), 100);
+    assert_eq!(s.token.balance(&s.treasury), 20);
+}
+
+// ---- 5. refund requires treasury auth; separate reference namespace ----------
+
+#[test]
+fn refund_requires_exact_treasury_auth() {
+    let s = setup();
+    let user = funded_user(&s, 0);
+    s.token_admin.mint(&s.treasury, &500);
+    let r = reference(&s, 3);
+
+    s.client.credit_refund(&user, &120, &r);
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            s.treasury.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    Symbol::new(&s.env, "credit_refund"),
+                    (user.clone(), 120_i128, r.clone()).into_val(&s.env),
+                )),
+                sub_invocations: std::vec![AuthorizedInvocation {
+                    function: AuthorizedFunction::Contract((
+                        s.token.address.clone(),
+                        symbol_short!("transfer"),
+                        (s.treasury.clone(), s.vault.clone(), 120_i128).into_val(&s.env),
+                    )),
+                    sub_invocations: std::vec![],
+                }],
+            }
+        )]
+    );
+    assert_eq!(s.client.balance(&user), 120);
+    assert_eq!(s.client.total_balances(), 120);
+    assert_eq!(s.token.balance(&s.vault), 120);
+    assert_eq!(s.token.balance(&s.treasury), 380);
+}
+
+#[test]
+fn refund_by_non_treasury_fails() {
+    let s = setup();
+    let user = funded_user(&s, 0);
+    s.token_admin.mint(&s.treasury, &500);
+    let r = reference(&s, 3);
+
+    for signer in [&user, &s.admin, &s.operator] {
+        s.env.mock_auths(&[MockAuth {
+            address: signer,
+            invoke: &MockAuthInvoke {
+                contract: &s.vault,
+                fn_name: "credit_refund",
+                args: (user.clone(), 120_i128, r.clone()).into_val(&s.env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &s.token.address,
+                    fn_name: "transfer",
+                    args: (s.treasury.clone(), s.vault.clone(), 120_i128).into_val(&s.env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        let res = s.client.try_credit_refund(&user, &120, &r);
+        assert!(matches!(res, Err(Err(_))), "expected a host auth error");
+    }
+
+    s.env.mock_all_auths();
+    assert_eq!(s.client.balance(&user), 0);
+    assert_eq!(s.token.balance(&s.treasury), 500);
+}
+
+#[test]
+fn spend_and_refund_references_are_separate_namespaces() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &100);
+    s.token_admin.mint(&s.treasury, &500);
+    let r = reference(&s, 9);
+
+    // The same 32 bytes can be used once as a spend and once as a refund...
+    s.client.settle_card_spend(&user, &30, &r);
+    s.client.credit_refund(&user, &30, &r);
+    // ...but not twice in either namespace.
+    assert_eq!(
+        s.client.try_settle_card_spend(&user, &1, &r),
+        Err(Ok(Error::DuplicateReference))
+    );
+    assert_eq!(
+        s.client.try_credit_refund(&user, &1, &r),
+        Err(Ok(Error::DuplicateReference))
+    );
+    assert_eq!(s.client.balance(&user), 100);
+}
+
+// ---- 8 (cont). amount <= 0 rejected on settle and refund ----------------------
+
+#[test]
+fn settle_and_refund_reject_non_positive_amounts() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &50);
+    s.token_admin.mint(&s.treasury, &500);
+
+    for amount in [0_i128, -1, i128::MIN] {
+        assert_eq!(
+            s.client
+                .try_settle_card_spend(&user, &amount, &reference(&s, 1)),
+            Err(Ok(Error::InvalidAmount))
+        );
+        assert_eq!(
+            s.client
+                .try_credit_refund(&user, &amount, &reference(&s, 2)),
+            Err(Ok(Error::InvalidAmount))
+        );
+    }
+    // The references were not consumed by the rejected calls.
+    s.client.settle_card_spend(&user, &1, &reference(&s, 1));
+    s.client.credit_refund(&user, &1, &reference(&s, 2));
+    assert_eq!(s.client.balance(&user), 50);
+}
+
+// ---- 12. settle more than balance ---------------------------------------------
+
+#[test]
+fn settle_more_than_balance_fails_and_keeps_reference_unused() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &60);
+    let r = reference(&s, 5);
+
+    assert_eq!(
+        s.client.try_settle_card_spend(&user, &61, &r),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(s.client.balance(&user), 60);
+    assert_eq!(s.client.total_balances(), 60);
+    assert_eq!(s.token.balance(&s.vault), 60);
+    assert_eq!(s.token.balance(&s.treasury), 0);
+
+    // The failed call did not consume the reference.
+    s.client.settle_card_spend(&user, &60, &r);
+    assert_eq!(s.client.balance(&user), 0);
+    assert_eq!(s.token.balance(&s.treasury), 60);
+}
+
+// ---- 14 (cont). settle and refund events --------------------------------------
+
+#[test]
+fn settle_and_refund_emit_events() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &100);
+    s.token_admin.mint(&s.treasury, &500);
+
+    let r1 = reference(&s, 11);
+    s.client.settle_card_spend(&user, &25, &r1);
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.vault),
+        [events::CardSpendSettled {
+            user: user.clone(),
+            amount: 25,
+            reference: r1,
+        }
+        .to_xdr(&s.env, &s.vault)]
+    );
+
+    let r2 = reference(&s, 12);
+    s.client.credit_refund(&user, &5, &r2);
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.vault),
+        [events::RefundCredited {
+            user: user.clone(),
+            amount: 5,
+            reference: r2,
         }
         .to_xdr(&s.env, &s.vault)]
     );
