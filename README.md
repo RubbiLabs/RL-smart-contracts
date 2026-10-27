@@ -158,13 +158,13 @@ pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32
 
 | Function | Auth | Errors | Events |
 |---|---|---|---|
-| `add_merchant(merchant, payout)` | admin | `MerchantExists` | `merchant_added` |
+| `add_merchant(merchant, payout)` — `payout` must already be able to receive USDC (trustline open) | admin | `MerchantExists`, `PayoutUnavailable` | `merchant_added` |
 | `set_merchant_active(merchant, active)` — inactive merchants cannot create plans or take subscribers; their subscriptions are skipped by `charge` | admin | `MerchantNotFound` | `merchant_active_set` |
 | `create_plan(merchant, name, amount, period) -> u32` | `merchant` (active) | `MerchantNotFound`, `MerchantInactive`, `NameTooLong`, `InvalidAmount`, `InvalidPeriod` | `plan_created` |
 | `set_plan_active(merchant, plan_id, active)` — deactivated plans take no new subscribers; existing ones keep running | `merchant` (plan owner) | `PlanNotFound`, `NotPlanOwner` | `plan_active_set` |
-| `subscribe(subscriber, plan_id) -> u64` — pulls the first period immediately; nothing is written if the pull fails | `subscriber` | `Paused`, `PlanNotFound`, `PlanInactive`, `MerchantNotFound`, `MerchantInactive`, `AlreadySubscribed`, `PaymentFailed`, `Overflow` | `subscribed`, `charged` |
-| `charge(sub_id) -> bool` — one period if due; `false` + `PastDue` on a failed pull, `false` + nothing written for an inactive merchant | none | `Paused`, `SubscriptionNotFound`, `NotChargeable`, `NotDue`, `PlanNotFound`, `MerchantNotFound`, `Overflow` | `charged`, `charge_failed` or `charge_skipped` |
-| `charge_batch(sub_ids) -> Vec<bool>` — per-item problems yield `false`, never fail the batch | none | `BatchTooLarge`, `Paused` | as `charge`, per item |
+| `subscribe(subscriber, plan_id) -> u64` — pulls the first period immediately; nothing is written if the pull fails or the payout address cannot receive USDC | `subscriber` | `Paused`, `PlanNotFound`, `PlanInactive`, `MerchantNotFound`, `MerchantInactive`, `AlreadySubscribed`, `PayoutUnavailable`, `PaymentFailed`, `Overflow` | `subscribed`, `charged` |
+| `charge(sub_id) -> bool` — one period if due; `false` + `PastDue` on a failed pull; `false` + nothing written (no pull, allowance untouched) for an inactive merchant or a payout address that cannot receive USDC | none | `Paused`, `SubscriptionNotFound`, `NotChargeable`, `NotDue`, `PlanNotFound`, `MerchantNotFound`, `Overflow` | `charged`, `charge_failed` or `charge_skipped` |
+| `charge_batch(sub_ids) -> Vec<bool>` — per-item problems yield `false`, never fail the batch; one unpayable merchant never blocks the others | none | `BatchTooLarge`, `Paused` | as `charge`, per item |
 | `pause_subscription(subscriber, sub_id)` — allowed while the contract is paused | `subscriber` | `SubscriptionNotFound`, `NotSubscriber`, `NotPausable` | `subscription_paused` |
 | `resume_subscription(subscriber, sub_id)` — `next_due = max(next_due, now)`; allowed while paused | `subscriber` | `SubscriptionNotFound`, `NotSubscriber`, `NotPaused` | `subscription_resumed` |
 | `cancel_subscription(subscriber, sub_id)` — final, frees the plan slot; allowed while paused | `subscriber` | `SubscriptionNotFound`, `NotSubscriber`, `AlreadyCancelled` | `subscription_cancelled` |
@@ -195,8 +195,8 @@ pub struct Schedule { pub id: u64, pub employer: Address, pub recipient: Address
 | `fund(employer, amount)` | `employer` | `InvalidAmount`, `Paused`, `Overflow` | `funded` |
 | `withdraw_escrow(employer, amount)` — allowed while paused | `employer` | `InvalidAmount`, `InsufficientEscrow` | `escrow_withdrawn` |
 | `create_schedules(employer, inputs, first_due) -> Vec<u64>` — up to 25 inputs, all first due at `first_due >= now`; validates everything before writing anything | `employer` | `Paused`, `TooManySchedules`, `FirstDueInPast`, `InvalidAmount`, `InvalidPeriod`, `LabelTooLong` | one `schedule_created` per schedule (without the label; read it with `get_schedule`) |
-| `disburse(schedule_id) -> bool` — pays exactly one period if due; `false` and nothing written when the employer's escrow is short | none | `Paused`, `ScheduleNotFound`, `NotActive`, `NotDue`, `Overflow` | `disbursed` or `disburse_failed` |
-| `disburse_batch(ids) -> Vec<bool>` — per-item problems yield `false` | none | `BatchTooLarge`, `Paused` | as `disburse`, per item |
+| `disburse(schedule_id) -> bool` — pays exactly one period if due; `false` and nothing written when the employer's escrow is short (`disburse_failed`, `insufficient_escrow`) or the recipient cannot receive USDC (`disburse_failed`, `recipient_unpayable`) | none | `Paused`, `ScheduleNotFound`, `NotActive`, `NotDue`, `Overflow` | `disbursed` or `disburse_failed` |
+| `disburse_batch(ids) -> Vec<bool>` — per-item problems yield `false`; one unpayable recipient never blocks the others | none | `BatchTooLarge`, `Paused` | as `disburse`, per item |
 | `pause_schedule(employer, schedule_id)` — `next_due` is not moved: owed salary stays owed; allowed while paused | `employer` | `ScheduleNotFound`, `NotEmployer`, `NotActive` | `schedule_paused` |
 | `resume_schedule(employer, schedule_id)` — keeps `next_due`; allowed while paused | `employer` | `ScheduleNotFound`, `NotEmployer`, `NotPaused` | `schedule_resumed` |
 | `cancel_schedule(employer, schedule_id)` — final; the shared escrow is untouched; allowed while paused | `employer` | `ScheduleNotFound`, `NotEmployer`, `AlreadyCancelled` | `schedule_cancelled` |
@@ -258,6 +258,7 @@ regenerates them).
 | 21 | `BatchTooLarge` | A batch has more than `MAX_BATCH` (25) items. |
 | 22 | `NoPendingAdmin` | `accept_admin` was called while no admin transfer is pending. |
 | 23 | `Overflow` | An arithmetic operation would overflow. |
+| 24 | `PayoutUnavailable` | The merchant's payout address cannot receive USDC: it has no USDC trustline, or the trustline is frozen. |
 <!-- errors:subscriptions:end -->
 
 ### payroll
@@ -333,6 +334,13 @@ the root of trust; a timelock on upgrades is a planned follow-up.
 one period, so a third-party caller can only make a payment happen on time,
 never early or twice.
 
+**One payee never blocks the others.** A merchant payout address or payroll
+recipient that cannot receive USDC (see "USDC trustlines") makes only its
+own item return `false`, with no state change and no funds moved; the rest
+of the batch is paid. In subscriptions the check runs before the pull, so
+the subscriber's allowance is never consumed for a merchant that cannot be
+paid.
+
 ## Money rules
 
 ### Fees
@@ -370,10 +378,13 @@ from the allowance alone.
 
 `charge_batch` and `disburse_batch` take up to 25 ids and return one `bool`
 per id in input order. A per-item problem (not due, paused or cancelled,
-unknown id, inactive merchant, failed pull, short escrow) yields `false` for
-that item and never fails the batch; only `BatchTooLarge` and `Paused` fail
-the whole call. Skipped items emit no event except `charge_skipped` for an
-inactive merchant.
+unknown id, inactive merchant, unpayable payout address or recipient, failed
+pull, short escrow) yields `false` for that item and never fails the batch;
+only `BatchTooLarge` and `Paused` fail the whole call. Items skipped for
+"not due", "not chargeable/active" or "unknown id" emit no event; the other
+cases emit `charge_failed`, `charge_skipped` (`merchant_inactive` or
+`payout_unavailable`) or `disburse_failed` (`insufficient_escrow` or
+`recipient_unpayable`).
 
 ### Why 25
 
@@ -389,20 +400,43 @@ have used 98% of it. Larger payrolls are created in several calls.
 ### USDC trustlines
 
 Classic Stellar accounts (`G...`) can only hold USDC after opening a
-trustline to the issuer (`change_trust`). The SAC rejects transfers to an
-account without one. Therefore:
+trustline to the issuer (`change_trust`). The SAC fails any `transfer` to,
+and any `balance` or `authorized` read of, an account without one
+(`Error(Contract, #13)`, "trustline entry is missing for account", verified
+on testnet on 2026-10-27); it also rejects transfers to a trustline the
+issuer has frozen (Circle's issuer has `auth_revocable` set) or that would
+exceed the trustline's limit. Contract addresses (`C...`) hold SAC balances
+without trustlines. Therefore:
 
 - the **treasury** and the **fee recipient** need a USDC trustline before
-  the first settlement, charge or disbursement (`scripts/deploy-testnet.sh`
-  creates them);
-- every **merchant payout address** and every **payroll recipient** that is a
-  regular account needs a USDC trustline before it can be paid. Payouts are
-  plain `transfer` calls, so a payout to an address without a trustline
-  aborts the whole `charge` or `disburse` invocation with a host error, and
-  the whole `charge_batch` / `disburse_batch` that contains it. Open the
-  trustline before allowlisting a merchant or scheduling a recipient; a
-  keeper that sees a batch fail should retry its items one by one. Contract
-  addresses (`C...`) hold SAC balances without trustlines.
+  the first settlement, charge or disbursement. `scripts/deploy-testnet.sh`
+  creates both, and `scripts/smoke-testnet.sh` checks them. The fee
+  recipient is admin-controlled, so the contracts pay it with a plain
+  `transfer`: if its trustline were ever missing or frozen, every `charge`
+  and `disburse` would abort as a whole until it is fixed.
+- every **merchant payout address** must have its USDC trustline open
+  **before `add_merchant`**: the contract checks it (`authorized` on the
+  SAC) and rejects the merchant with `PayoutUnavailable` otherwise. The same
+  check runs in `subscribe` (error `PayoutUnavailable`) and before every
+  `charge`: a merchant whose payout address can no longer receive USDC makes
+  the charge return `false` with `charge_skipped` (`payout_unavailable`),
+  nothing pulled, the subscriber's allowance untouched, no `PastDue`, and
+  `next_due` unchanged. Charging resumes once the address can receive USDC.
+- every **payroll recipient** that is a regular account must have its USDC
+  trustline open **before its first disbursement**. `disburse` pays the
+  recipient with `try_transfer` before writing anything: a recipient that
+  cannot receive USDC makes that item return `false` with `disburse_failed`
+  (`recipient_unpayable`), escrow, totals and `next_due` unchanged, so the
+  period stays owed and is paid as soon as the trustline exists.
+
+Residual cases the subscriptions pre-check does not cover, because
+`authorized` cannot see them: a payout trustline whose **limit** the payment
+would exceed, and this contract's own USDC balance being **frozen** by the
+issuer. Both still abort the whole `charge` or `charge_batch` with a host
+error (the subscriber's allowance is not consumed, since the whole
+transaction reverts). Payroll's `try_transfer` covers every recipient-side
+cause. The keeper (Phase 4) must therefore retry a failed batch item by item
+so that one such item cannot hold up the others.
 
 On testnet, get XLM from Friendbot (`stellar keys fund <name> --network
 testnet`, or [Stellar Lab](https://lab.stellar.org/account/fund)) and USDC
@@ -503,6 +537,19 @@ prints or logs a secret key. Nothing in this repository contains a key.
    ```
 
 5. Commit `deployments/testnet.json` and fill in the table below.
+
+6. **Trustlines for payees.** Before `add_merchant`, the merchant's payout
+   address must hold a USDC trustline (the call fails with
+   `PayoutUnavailable` otherwise); a payroll recipient that is a regular
+   account needs one before its first disbursement (until then each
+   `disburse` returns `false` with `disburse_failed`, `recipient_unpayable`,
+   and the period stays owed). Check and open one with the CLI, signed by
+   the payee:
+
+   ```sh
+   stellar ledger entry fetch trustline --account <G-address> --asset USDC:<issuer> --network testnet --output json
+   stellar tx new change-trust --source-account <payee-identity> --line USDC:<issuer> --network testnet
+   ```
 
 ## Testnet deployments
 
