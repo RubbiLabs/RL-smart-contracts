@@ -101,6 +101,36 @@ pub struct ChargeSkipped {
     pub reason: Symbol,
 }
 
+/// `subscription_paused`: `subscriber` paused subscription `sub_id`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionPaused {
+    #[topic]
+    pub subscriber: Address,
+    pub sub_id: u64,
+}
+
+/// `subscription_resumed`: `subscriber` resumed subscription `sub_id`; the
+/// next charge is due at `next_due` (never in the past).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionResumed {
+    #[topic]
+    pub subscriber: Address,
+    pub sub_id: u64,
+    pub next_due: u64,
+}
+
+/// `subscription_cancelled`: `subscriber` cancelled subscription `sub_id`.
+/// Final; the subscriber may subscribe to the plan again.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionCancelled {
+    #[topic]
+    pub subscriber: Address,
+    pub sub_id: u64,
+}
+
 /// `fee_set`: the admin changed the fee to `fee_bps` basis points.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

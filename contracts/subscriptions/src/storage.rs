@@ -225,3 +225,10 @@ pub fn get_sub_id_of(env: &Env, subscriber: &Address, plan_id: u32) -> Option<u6
 pub fn set_sub_id_of(env: &Env, subscriber: &Address, plan_id: u32, sub_id: u64) {
     set_persistent(env, &DataKey::SubOf(subscriber.clone(), plan_id), &sub_id);
 }
+
+/// Free the (subscriber, plan) slot when a subscription is cancelled.
+pub fn remove_sub_id_of(env: &Env, subscriber: &Address, plan_id: u32) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::SubOf(subscriber.clone(), plan_id));
+}

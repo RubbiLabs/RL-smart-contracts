@@ -1167,3 +1167,258 @@ fn charge_batch_returns_false_for_skipped_items_instead_of_failing() {
     assert_eq!(s.token.balance(&unfunded), 980 * USDC);
     let _ = (merchant_a, payout_a_before);
 }
+
+// ---- subscriber pause / resume / cancel (L7) -----------------------------------------
+
+#[test]
+fn only_the_subscriber_can_pause_resume_or_cancel() {
+    let s = setup();
+    let (merchant, _payout, plan_id) = merchant_with_plan(&s, USDC);
+    let user = subscriber(&s, 100 * USDC);
+    let other = subscriber(&s, 100 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    let other_sub = s.client.subscribe(&other, &plan_id);
+
+    // Another subscriber signing for their own address but naming the
+    // victim's subscription id: rejected by the ownership check (L7: the
+    // subscription is addressed by its own id, never by a plan index).
+    for (f, res) in [
+        (
+            "pause_subscription",
+            s.client.try_pause_subscription(&other, &sub_id),
+        ),
+        (
+            "resume_subscription",
+            s.client.try_resume_subscription(&other, &sub_id),
+        ),
+        (
+            "cancel_subscription",
+            s.client.try_cancel_subscription(&other, &sub_id),
+        ),
+    ] {
+        assert_eq!(res, Err(Ok(Error::NotSubscriber)), "{f}");
+    }
+    // Admin, merchant or a stranger signing on the subscriber's behalf:
+    // rejected by `require_auth`.
+    for signer in [&s.admin, &merchant, &Address::generate(&s.env)] {
+        for f in [
+            "pause_subscription",
+            "resume_subscription",
+            "cancel_subscription",
+        ] {
+            mock_auth_for(&s, signer, f, (user.clone(), sub_id).into_val(&s.env));
+            let res = match f {
+                "pause_subscription" => s.client.try_pause_subscription(&user, &sub_id),
+                "resume_subscription" => s.client.try_resume_subscription(&user, &sub_id),
+                _ => s.client.try_cancel_subscription(&user, &sub_id),
+            };
+            assert!(matches!(res, Err(Err(_))), "{f} by wrong signer");
+        }
+    }
+    s.env.mock_all_auths();
+    assert_eq!(status_of(&s, sub_id), SubStatus::Active);
+    assert_eq!(status_of(&s, other_sub), SubStatus::Active);
+    assert_eq!(
+        s.client.try_pause_subscription(&user, &99),
+        Err(Ok(Error::SubscriptionNotFound))
+    );
+
+    // The owner succeeds, with exactly their own authorization.
+    s.client.pause_subscription(&user, &sub_id);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &user,
+            "pause_subscription",
+            (user.clone(), sub_id).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [events::SubscriptionPaused {
+            subscriber: user.clone(),
+            sub_id,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    assert_eq!(status_of(&s, sub_id), SubStatus::Paused);
+    assert_eq!(status_of(&s, other_sub), SubStatus::Active);
+}
+
+#[test]
+fn paused_subscription_is_not_charged_and_resume_never_sets_next_due_in_the_past() {
+    let s = setup();
+    let (_merchant, _payout, plan_id) = merchant_with_plan(&s, 10 * USDC);
+    let user = subscriber(&s, 1_000 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+
+    // Pause before the period elapsed: resume keeps the original due date.
+    s.client.pause_subscription(&user, &sub_id);
+    advance(&s, MONTH / 2);
+    s.client.resume_subscription(&user, &sub_id);
+    assert_eq!(
+        last_events(&s),
+        [events::SubscriptionResumed {
+            subscriber: user.clone(),
+            sub_id,
+            next_due: START + MONTH,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    assert_eq!(next_due_of(&s, sub_id), START + MONTH);
+    assert_eq!(status_of(&s, sub_id), SubStatus::Active);
+
+    // Pause across several due dates: not chargeable meanwhile, and resume
+    // moves next_due to now (nothing is owed for the paused time).
+    s.client.pause_subscription(&user, &sub_id);
+    advance(&s, 3 * MONTH);
+    assert_eq!(s.client.try_charge(&sub_id), Err(Ok(Error::NotChargeable)));
+    assert_eq!(
+        s.client.charge_batch(&soroban_sdk::vec![&s.env, sub_id]),
+        soroban_sdk::vec![&s.env, false]
+    );
+    assert_eq!(s.token.balance(&user), 990 * USDC);
+    s.client.resume_subscription(&user, &sub_id);
+    assert_eq!(next_due_of(&s, sub_id), now(&s));
+    // Due immediately after resuming: one charge, then one period ahead.
+    assert!(s.client.charge(&sub_id));
+    assert_eq!(s.token.balance(&user), 980 * USDC);
+    assert_eq!(next_due_of(&s, sub_id), now(&s) + MONTH);
+}
+
+#[test]
+fn status_transitions_follow_the_state_machine() {
+    let s = setup();
+    let (_merchant, _payout, plan_id) = merchant_with_plan(&s, 10 * USDC);
+    let user = subscriber_with(&s, 1_000 * USDC, 10 * USDC, far_future_ledger(&s));
+    let sub_id = s.client.subscribe(&user, &plan_id);
+
+    // Active: resume is invalid, pause is valid.
+    assert_eq!(
+        s.client.try_resume_subscription(&user, &sub_id),
+        Err(Ok(Error::NotPaused))
+    );
+    s.client.pause_subscription(&user, &sub_id);
+    // Paused: pause again is invalid.
+    assert_eq!(
+        s.client.try_pause_subscription(&user, &sub_id),
+        Err(Ok(Error::NotPausable))
+    );
+    s.client.resume_subscription(&user, &sub_id);
+
+    // PastDue (allowance exhausted): can be paused and resumed.
+    advance(&s, MONTH);
+    assert!(!s.client.charge(&sub_id));
+    assert_eq!(status_of(&s, sub_id), SubStatus::PastDue);
+    s.client.pause_subscription(&user, &sub_id);
+    assert_eq!(status_of(&s, sub_id), SubStatus::Paused);
+    s.client.resume_subscription(&user, &sub_id);
+    // Resuming a formerly past-due sub makes it Active again; it is still
+    // due, so the next charge (now funded) succeeds.
+    assert_eq!(status_of(&s, sub_id), SubStatus::Active);
+    s.token
+        .approve(&user, &s.contract, &(100 * USDC), &far_future_ledger(&s));
+    assert!(s.client.charge(&sub_id));
+
+    // Cancel from Active; then everything else is invalid.
+    s.client.cancel_subscription(&user, &sub_id);
+    assert_eq!(status_of(&s, sub_id), SubStatus::Cancelled);
+    assert_eq!(
+        s.client.try_cancel_subscription(&user, &sub_id),
+        Err(Ok(Error::AlreadyCancelled))
+    );
+    assert_eq!(
+        s.client.try_pause_subscription(&user, &sub_id),
+        Err(Ok(Error::NotPausable))
+    );
+    assert_eq!(
+        s.client.try_resume_subscription(&user, &sub_id),
+        Err(Ok(Error::NotPaused))
+    );
+    advance(&s, MONTH);
+    assert_eq!(s.client.try_charge(&sub_id), Err(Ok(Error::NotChargeable)));
+
+    // Cancel from Paused and from PastDue are both allowed.
+    let paused = s.client.subscribe(&user, &plan_id);
+    s.client.pause_subscription(&user, &paused);
+    s.client.cancel_subscription(&user, &paused);
+    assert_eq!(status_of(&s, paused), SubStatus::Cancelled);
+    s.token
+        .approve(&user, &s.contract, &(10 * USDC), &far_future_ledger(&s));
+    let past_due = s.client.subscribe(&user, &plan_id);
+    advance(&s, MONTH);
+    assert!(!s.client.charge(&past_due));
+    assert_eq!(status_of(&s, past_due), SubStatus::PastDue);
+    s.client.cancel_subscription(&user, &past_due);
+    assert_eq!(status_of(&s, past_due), SubStatus::Cancelled);
+}
+
+#[test]
+fn cancel_frees_the_slot_and_resubscribe_works() {
+    let s = setup();
+    let (_merchant, payout, plan_id) = merchant_with_plan(&s, 10 * USDC);
+    let user = subscriber(&s, 1_000 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    assert_eq!(s.client.sub_id_of(&user, &plan_id), Some(sub_id));
+
+    s.client.cancel_subscription(&user, &sub_id);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &user,
+            "cancel_subscription",
+            (user.clone(), sub_id).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [events::SubscriptionCancelled {
+            subscriber: user.clone(),
+            sub_id,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    assert_eq!(s.client.sub_id_of(&user, &plan_id), None);
+    // The cancelled subscription stays readable by id (L10).
+    assert_eq!(status_of(&s, sub_id), SubStatus::Cancelled);
+    let payout_before = s.token.balance(&payout);
+
+    // Re-subscribing creates a new subscription (new id) and charges the
+    // first period again.
+    let new_id = s.client.subscribe(&user, &plan_id);
+    assert_eq!(new_id, 2);
+    assert_eq!(s.client.sub_id_of(&user, &plan_id), Some(new_id));
+    assert_eq!(status_of(&s, new_id), SubStatus::Active);
+    assert_eq!(s.token.balance(&user), 980 * USDC);
+    assert!(s.token.balance(&payout) > payout_before);
+    // The old one is still cancelled and inert.
+    advance(&s, MONTH);
+    assert_eq!(s.client.try_charge(&sub_id), Err(Ok(Error::NotChargeable)));
+    assert!(s.client.charge(&new_id));
+}
+
+#[test]
+fn subscribers_keep_control_while_the_contract_is_paused() {
+    let s = setup();
+    let (_merchant, _payout, plan_id) = merchant_with_plan(&s, USDC);
+    let user = subscriber(&s, 100 * USDC);
+    let a = s.client.subscribe(&user, &plan_id);
+    let (merchant_b, _, _) = merchant_with_plan(&s, USDC);
+    let plan_b = s
+        .client
+        .create_plan(&merchant_b, &name(&s, "B"), &USDC, &MONTH);
+    let b = s.client.subscribe(&user, &plan_b);
+    s.client.pause_subscription(&user, &b);
+
+    s.client.pause();
+    s.client.pause_subscription(&user, &a);
+    s.client.resume_subscription(&user, &a);
+    s.client.cancel_subscription(&user, &a);
+    s.client.resume_subscription(&user, &b);
+    s.client.cancel_subscription(&user, &b);
+    assert_eq!(status_of(&s, a), SubStatus::Cancelled);
+    assert_eq!(status_of(&s, b), SubStatus::Cancelled);
+    s.client.unpause();
+}

@@ -324,6 +324,74 @@ impl SubscriptionsContract {
         Ok(id)
     }
 
+    /// Pause subscription `sub_id`: it is not charged until resumed.
+    /// Allowed while the contract is paused.
+    ///
+    /// Auth: `subscriber`, who must own the subscription.
+    /// Errors: `SubscriptionNotFound`, `NotSubscriber`, `NotPausable` (status
+    /// is not `Active` or `PastDue`).
+    /// Events: `subscription_paused`.
+    pub fn pause_subscription(env: Env, subscriber: Address, sub_id: u64) -> Result<(), Error> {
+        subscriber.require_auth();
+        let mut sub = owned_subscription(&env, &subscriber, sub_id)?;
+        if !matches!(sub.status, SubStatus::Active | SubStatus::PastDue) {
+            return Err(Error::NotPausable);
+        }
+        storage::extend_instance(&env);
+        sub.status = SubStatus::Paused;
+        storage::set_subscription(&env, &sub);
+        events::SubscriptionPaused { subscriber, sub_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Resume a paused subscription. `next_due` becomes
+    /// `max(next_due, now)`: periods that fell due while paused are not
+    /// charged, and a subscription whose period has not elapsed yet keeps
+    /// its original due date. Allowed while the contract is paused.
+    ///
+    /// Auth: `subscriber`, who must own the subscription.
+    /// Errors: `SubscriptionNotFound`, `NotSubscriber`, `NotPaused`.
+    /// Events: `subscription_resumed`.
+    pub fn resume_subscription(env: Env, subscriber: Address, sub_id: u64) -> Result<(), Error> {
+        subscriber.require_auth();
+        let mut sub = owned_subscription(&env, &subscriber, sub_id)?;
+        if sub.status != SubStatus::Paused {
+            return Err(Error::NotPaused);
+        }
+        storage::extend_instance(&env);
+        sub.status = SubStatus::Active;
+        sub.next_due = sub.next_due.max(env.ledger().timestamp());
+        storage::set_subscription(&env, &sub);
+        events::SubscriptionResumed {
+            subscriber,
+            sub_id,
+            next_due: sub.next_due,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancel subscription `sub_id`. Final: the subscription can never be
+    /// charged or resumed again, and the subscriber may subscribe to the
+    /// same plan afresh. Allowed while the contract is paused.
+    ///
+    /// Auth: `subscriber`, who must own the subscription.
+    /// Errors: `SubscriptionNotFound`, `NotSubscriber`, `AlreadyCancelled`.
+    /// Events: `subscription_cancelled`.
+    pub fn cancel_subscription(env: Env, subscriber: Address, sub_id: u64) -> Result<(), Error> {
+        subscriber.require_auth();
+        let mut sub = owned_subscription(&env, &subscriber, sub_id)?;
+        if sub.status == SubStatus::Cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+        storage::extend_instance(&env);
+        sub.status = SubStatus::Cancelled;
+        storage::set_subscription(&env, &sub);
+        storage::remove_sub_id_of(&env, &subscriber, sub.plan_id);
+        events::SubscriptionCancelled { subscriber, sub_id }.publish(&env);
+        Ok(())
+    }
+
     // ---- charging (permissionless, time-gated) -----------------------------
 
     /// Charge one period of subscription `sub_id`, if it is due.
@@ -571,6 +639,15 @@ fn require_active_merchant(env: &Env, merchant: &Address) -> Result<Merchant, Er
         return Err(Error::MerchantInactive);
     }
     Ok(record)
+}
+
+/// The subscription `sub_id`, which must belong to `subscriber`.
+fn owned_subscription(env: &Env, subscriber: &Address, sub_id: u64) -> Result<Subscription, Error> {
+    let sub = storage::get_subscription(env, sub_id).ok_or(Error::SubscriptionNotFound)?;
+    if sub.subscriber != *subscriber {
+        return Err(Error::NotSubscriber);
+    }
+    Ok(sub)
 }
 
 /// `amount * fee_bps / 10_000`, rounded down.
