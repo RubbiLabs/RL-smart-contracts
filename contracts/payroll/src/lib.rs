@@ -32,7 +32,7 @@ mod test;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, BytesN, ContractExecutable, Env, String,
-    Vec,
+    Symbol, Vec,
 };
 
 pub use errors::Error;
@@ -328,13 +328,20 @@ impl PayrollContract {
 
     /// Pay one period of schedule `schedule_id`, if it is due.
     ///
-    /// Requires status `Active` and `now >= next_due`. If the employer's
-    /// escrow is smaller than the schedule amount, nothing changes,
-    /// `disburse_failed` is emitted and `false` is returned (the period
-    /// stays owed). Otherwise the escrow is debited `amount`, `next_due`
-    /// advances by exactly one period, the recipient receives
-    /// `amount - fee` and the fee recipient `fee`, `disbursed` is emitted
-    /// and `true` is returned.
+    /// Requires status `Active` and `now >= next_due`. Returns `false` with
+    /// nothing changed (escrow, totals and `next_due` untouched, so the
+    /// period stays owed) and emits `disburse_failed` in two cases:
+    /// - `reason = insufficient_escrow`: the employer's escrow is smaller
+    ///   than the schedule amount;
+    /// - `reason = recipient_unpayable`: the recipient cannot receive USDC
+    ///   (no trustline, frozen trustline, or trustline limit exceeded).
+    ///
+    /// Otherwise the escrow is debited `amount`, `next_due` advances by
+    /// exactly one period, the recipient receives `amount - fee` and the fee
+    /// recipient `fee`, `disbursed` is emitted and `true` is returned. The
+    /// fee recipient is admin-controlled and its USDC trustline is created
+    /// by the deploy script; a fee transfer that fails anyway aborts the
+    /// whole call.
     ///
     /// Back pay: `next_due` always advances by exactly one period, so N
     /// missed periods are paid by N calls, each of them time-gated.
@@ -352,8 +359,9 @@ impl PayrollContract {
     /// Pay one period of every schedule in `ids` that is due. Returns one
     /// `bool` per input id, in order: `true` when a period was paid, `false`
     /// when the item was skipped for any per-item reason (not due, not
-    /// active, unknown id) or its employer's escrow was insufficient (as in
-    /// `disburse`).
+    /// active, unknown id) or failed as in `disburse` (insufficient escrow,
+    /// unpayable recipient). One recipient who cannot receive USDC never
+    /// blocks the other items.
     ///
     /// Auth: none (permissionless).
     /// Errors: `BatchTooLarge` (> 25 ids), `Paused`. Per-item errors never
@@ -575,6 +583,17 @@ fn fee_for(env: &Env, amount: i128) -> Result<i128, Error> {
 }
 
 /// The body of `disburse` for one schedule, without the pause check.
+///
+/// Ordering, deliberately: the recipient payout (`try_transfer`) runs
+/// *before* the storage writes, so a recipient who cannot receive USDC
+/// leaves no trace (no escrow debit, no `next_due` change) and is reported
+/// per item instead of aborting the call. This is the one place in Rubbi
+/// where an interaction precedes effects. It is safe because the Soroban
+/// host rejects contract re-entry ("Contract re-entry is not allowed"), so
+/// the token contract cannot call back into this contract while the payout
+/// is in flight, and because the host rolls back a failed `try_transfer`
+/// completely. The fee transfer stays a plain `transfer`: the fee recipient
+/// is admin-controlled and the deploy script guarantees its trustline.
 fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
     let mut schedule = storage::get_schedule(env, schedule_id).ok_or(Error::ScheduleNotFound)?;
     if schedule.status != ScheduleStatus::Active {
@@ -592,24 +611,44 @@ fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
             schedule_id,
             amount: schedule.amount,
             escrow,
+            reason: Symbol::new(env, "insufficient_escrow"),
         }
         .publish(env);
         return Ok(false);
     }
 
     let fee = fee_for(env, schedule.amount)?;
-    // Effects: debit the escrow and advance by exactly one period (L3)...
-    debit_escrow(env, &schedule.employer, schedule.amount)?;
-    schedule.next_due = schedule
+    let next_due = schedule
         .next_due
         .checked_add(schedule.period)
         .ok_or(Error::Overflow)?;
-    storage::set_schedule(env, &schedule);
 
-    // ...then interactions.
+    // Interaction first (see above): pay the recipient out of the escrow
+    // this contract holds. Any failure (missing or frozen trustline, limit
+    // exceeded) is rolled back by the host and reported per item.
     let token = token::TokenClient::new(env, &storage::get_token(env));
     let this = env.current_contract_address();
-    token.transfer(&this, &schedule.recipient, &(schedule.amount - fee));
+    if token
+        .try_transfer(&this, &schedule.recipient, &(schedule.amount - fee))
+        .is_err()
+    {
+        events::DisburseFailed {
+            employer: schedule.employer,
+            schedule_id,
+            amount: schedule.amount,
+            escrow,
+            reason: Symbol::new(env, "recipient_unpayable"),
+        }
+        .publish(env);
+        return Ok(false);
+    }
+
+    // Effects: debit the escrow and advance by exactly one period (L3).
+    debit_escrow(env, &schedule.employer, schedule.amount)?;
+    schedule.next_due = next_due;
+    storage::set_schedule(env, &schedule);
+
+    // The fee recipient is admin-controlled: a plain transfer.
     if fee > 0 {
         token.transfer(&this, storage::get_fee_recipient(env), &fee);
     }

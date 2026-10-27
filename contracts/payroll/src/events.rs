@@ -4,7 +4,7 @@
 //! and events about an employer carry the employer address as the second
 //! topic, so an indexer can filter by contract + event name + address.
 
-use soroban_sdk::{contractevent, Address, BytesN};
+use soroban_sdk::{contractevent, Address, BytesN, Symbol};
 
 /// `funded`: `employer` moved `amount` from their wallet into escrow.
 #[contractevent]
@@ -58,9 +58,12 @@ pub struct Disbursed {
     pub next_due: u64,
 }
 
-/// `disburse_failed`: schedule `schedule_id` was due but `employer`'s
-/// escrow (`escrow`) is smaller than `amount`. Nothing changed; the period
-/// stays owed.
+/// `disburse_failed`: schedule `schedule_id` was due but could not be paid.
+/// Nothing changed; the period stays owed. `reason` is one of:
+/// - `insufficient_escrow`: `employer`'s escrow (`escrow`) is smaller than
+///   `amount`;
+/// - `recipient_unpayable`: the recipient cannot receive USDC (no
+///   trustline, frozen trustline, or trustline limit exceeded).
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DisburseFailed {
@@ -69,6 +72,7 @@ pub struct DisburseFailed {
     pub schedule_id: u64,
     pub amount: i128,
     pub escrow: i128,
+    pub reason: Symbol,
 }
 
 /// `schedule_paused`: `employer` paused schedule `schedule_id`. Periods

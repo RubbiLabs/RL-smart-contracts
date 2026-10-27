@@ -3,7 +3,7 @@
 extern crate std;
 
 use soroban_sdk::{
-    symbol_short,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short,
     testutils::{
         Address as _, AuthorizedFunction, AuthorizedInvocation, Events as _, Ledger as _, MockAuth,
         MockAuthInvoke,
@@ -38,23 +38,42 @@ struct Setup {
     client: PayrollContractClient<'static>,
 }
 
+/// The default setup: the token is the SDK's test Stellar Asset Contract.
 fn setup() -> Setup {
+    let env = new_env();
+    let token_issuer = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_issuer);
+    build(env, sac.address())
+}
+
+/// Like `setup`, but the token is [`MockToken`], which can be told to reject
+/// one address the way the real SAC rejects an account without a USDC
+/// trustline. Returns the mock's client as well.
+fn setup_with_mock_token() -> (Setup, MockTokenClient<'static>) {
+    let env = new_env();
+    let mock = env.register(MockToken, ());
+    let mock_client = MockTokenClient::new(&env, &mock);
+    (build(env, mock), mock_client)
+}
+
+fn new_env() -> Env {
     let env = Env::default();
     env.ledger().with_mut(|li| {
         li.timestamp = START;
         li.sequence_number = 1_000;
     });
+    env
+}
+
+fn build(env: Env, token_address: Address) -> Setup {
     let admin = Address::generate(&env);
     let fee_recipient = Address::generate(&env);
-    let token_issuer = Address::generate(&env);
-
-    let sac = env.register_stellar_asset_contract_v2(token_issuer);
-    let token = TokenClient::new(&env, &sac.address());
-    let token_admin = StellarAssetClient::new(&env, &sac.address());
+    let token = TokenClient::new(&env, &token_address);
+    let token_admin = StellarAssetClient::new(&env, &token_address);
 
     let contract = env.register(
         PayrollContract,
-        (&admin, &sac.address(), &fee_recipient, FEE_BPS),
+        (&admin, &token_address, &fee_recipient, FEE_BPS),
     );
     let client = PayrollContractClient::new(&env, &contract);
 
@@ -67,6 +86,124 @@ fn setup() -> Setup {
         contract,
         client,
     }
+}
+
+// ---- mock token ----------------------------------------------------------------
+//
+// The SDK's test Stellar Asset Contract only ever sees contract addresses
+// (`testutils::Address::generate` never creates G-accounts), so it cannot
+// model a recipient without a USDC trustline. `MockToken` implements the
+// token functions the payroll contract uses and rejects transfers to, and
+// reads of, one configurable "unpayable" address with a contract error, the
+// way the real SAC fails for an account without a trustline
+// (`Error(Contract, #13)`, "trustline entry is missing for account"). The
+// mock uses code 100 so it cannot be mistaken for a payroll error code.
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum MockTokenError {
+    /// Stands in for the SAC's `TrustlineMissingError`.
+    Unpayable = 100,
+    InsufficientBalance = 101,
+    InsufficientAllowance = 102,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum MockKey {
+    Balance(Address),
+    Allowance(Address, Address),
+    Unpayable,
+}
+
+#[contract]
+pub struct MockToken;
+
+#[contractimpl]
+impl MockToken {
+    /// Make `addr` unable to hold the token. Pass a fresh address to make
+    /// everyone payable again.
+    pub fn set_unpayable(env: Env, addr: Address) {
+        env.storage().instance().set(&MockKey::Unpayable, &addr);
+    }
+
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        require_payable(&env, &to);
+        set_balance(&env, &to, balance_of(&env, &to) + amount);
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        require_payable(&env, &id);
+        balance_of(&env, &id)
+    }
+
+    pub fn authorized(env: Env, id: Address) -> bool {
+        require_payable(&env, &id);
+        true
+    }
+
+    pub fn approve(env: Env, from: Address, spender: Address, amount: i128, _live_until: u32) {
+        from.require_auth();
+        env.storage()
+            .instance()
+            .set(&MockKey::Allowance(from, spender), &amount);
+    }
+
+    pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&MockKey::Allowance(from, spender))
+            .unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        move_tokens(&env, &from, &to, amount);
+    }
+
+    pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        spender.require_auth();
+        let allowance = Self::allowance(env.clone(), from.clone(), spender.clone());
+        if allowance < amount {
+            panic_with_error!(&env, MockTokenError::InsufficientAllowance);
+        }
+        env.storage().instance().set(
+            &MockKey::Allowance(from.clone(), spender),
+            &(allowance - amount),
+        );
+        move_tokens(&env, &from, &to, amount);
+    }
+}
+
+fn require_payable(env: &Env, addr: &Address) {
+    let unpayable: Option<Address> = env.storage().instance().get(&MockKey::Unpayable);
+    if unpayable.as_ref() == Some(addr) {
+        panic_with_error!(env, MockTokenError::Unpayable);
+    }
+}
+
+fn balance_of(env: &Env, addr: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&MockKey::Balance(addr.clone()))
+        .unwrap_or(0)
+}
+
+fn set_balance(env: &Env, addr: &Address, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&MockKey::Balance(addr.clone()), &amount);
+}
+
+fn move_tokens(env: &Env, from: &Address, to: &Address, amount: i128) {
+    require_payable(env, to);
+    let from_balance = balance_of(env, from);
+    if from_balance < amount {
+        panic_with_error!(env, MockTokenError::InsufficientBalance);
+    }
+    set_balance(env, from, from_balance - amount);
+    set_balance(env, to, balance_of(env, to) + amount);
 }
 
 /// Whether a `try_*` call to a function *without* a contract error type
@@ -778,6 +915,7 @@ fn insufficient_escrow_returns_false_and_changes_nothing() {
             schedule_id: id,
             amount: 100 * USDC,
             escrow: 50 * USDC,
+            reason: Symbol::new(&s.env, "insufficient_escrow"),
         }
         .to_xdr(&s.env, &s.contract)]
     );
@@ -929,6 +1067,126 @@ fn disburse_batch_returns_false_for_skipped_items_instead_of_failing() {
         soroban_sdk::vec![&s.env, false, false, true]
     );
     assert_eq!(s.token.balance(&staff_c), 100 * USDC - fee);
+}
+
+// ---- unpayable recipient: disburse returns false, nothing changes ---------------
+
+#[test]
+fn disburse_returns_false_and_changes_nothing_when_the_recipient_cannot_receive_usdc() {
+    let (s, mock) = setup_with_mock_token();
+    let (boss, staff, id) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+    let fee = 100 * USDC * FEE_BPS as i128 / 10_000;
+
+    // The recipient cannot hold USDC (no trustline, or a frozen one).
+    mock.set_unpayable(&staff);
+    assert!(!s.client.disburse(&id));
+    assert_eq!(
+        last_events(&s),
+        [events::DisburseFailed {
+            employer: boss.clone(),
+            schedule_id: id,
+            amount: 100 * USDC,
+            escrow: 1_000 * USDC,
+            reason: Symbol::new(&s.env, "recipient_unpayable"),
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    // No state change: escrow, totals and next_due untouched; no funds moved.
+    let schedule = s.client.get_schedule(&id);
+    assert_eq!(schedule.status, ScheduleStatus::Active);
+    assert_eq!(schedule.next_due, START, "the period stays owed");
+    assert_eq!(s.client.escrow_of(&boss), 1_000 * USDC);
+    assert_eq!(s.client.total_escrow(), 1_000 * USDC);
+    assert_eq!(s.token.balance(&s.contract), 1_000 * USDC);
+    assert_eq!(s.token.balance(&s.fee_recipient), 0);
+    assert!(
+        s.token.try_balance(&staff).is_err(),
+        "like the SAC, unreadable"
+    );
+
+    // Retrying fails the same way, idempotently.
+    assert!(!s.client.disburse(&id));
+    assert_eq!(next_due_of(&s, id), START);
+
+    // Once the recipient can receive USDC, the owed period is paid.
+    mock.set_unpayable(&Address::generate(&s.env));
+    assert!(s.client.disburse(&id));
+    assert_eq!(s.token.balance(&staff), 100 * USDC - fee);
+    assert_eq!(s.token.balance(&s.fee_recipient), fee);
+    assert_eq!(s.client.escrow_of(&boss), 900 * USDC);
+    assert_eq!(next_due_of(&s, id), START + MONTH);
+}
+
+#[test]
+fn disburse_batch_pays_everyone_else_when_one_recipient_is_unpayable() {
+    let (s, mock) = setup_with_mock_token();
+    let (boss, staff_a, a) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+    let staff_b = Address::generate(&s.env);
+    let staff_c = Address::generate(&s.env);
+    let ids = s.client.create_schedules(
+        &boss,
+        &soroban_sdk::vec![
+            &s.env,
+            input(&s, &staff_b, 200 * USDC, MONTH, "B"),
+            input(&s, &staff_c, 300 * USDC, MONTH, "C"),
+        ],
+        &now(&s),
+    );
+    let (b, c) = (ids.get(0).unwrap(), ids.get(1).unwrap());
+    let fee = |amount: i128| amount * FEE_BPS as i128 / 10_000;
+
+    mock.set_unpayable(&staff_b);
+    assert_eq!(
+        s.client.disburse_batch(&soroban_sdk::vec![&s.env, a, b, c]),
+        soroban_sdk::vec![&s.env, true, false, true]
+    );
+    // Exactly one event per item, the middle one a `disburse_failed`.
+    let batch_events = last_events(&s);
+    assert_eq!(batch_events.events().len(), 3);
+    assert_eq!(
+        batch_events.events()[1],
+        events::DisburseFailed {
+            employer: boss.clone(),
+            schedule_id: b,
+            amount: 200 * USDC,
+            escrow: 900 * USDC,
+            reason: Symbol::new(&s.env, "recipient_unpayable"),
+        }
+        .to_xdr(&s.env, &s.contract)
+    );
+    // A and C were paid in full; B changed nothing and stays owed.
+    assert_eq!(s.token.balance(&staff_a), 100 * USDC - fee(100 * USDC));
+    assert_eq!(s.token.balance(&staff_c), 300 * USDC - fee(300 * USDC));
+    assert!(s.token.try_balance(&staff_b).is_err());
+    assert_eq!(
+        s.token.balance(&s.fee_recipient),
+        fee(100 * USDC) + fee(300 * USDC)
+    );
+    assert_eq!(s.client.escrow_of(&boss), 600 * USDC);
+    assert_eq!(s.client.total_escrow(), 600 * USDC);
+    assert_eq!(s.token.balance(&s.contract), 600 * USDC);
+    assert_eq!(next_due_of(&s, a), START + MONTH);
+    assert_eq!(next_due_of(&s, b), START);
+    assert_eq!(next_due_of(&s, c), START + MONTH);
+}
+
+#[test]
+fn unpayable_fee_recipient_aborts_the_whole_disbursement() {
+    // The fee recipient is admin-controlled and the deploy script creates
+    // its trustline, so there is no per-item handling for it: the call
+    // fails as a whole, and the host rolls back the recipient's payout too.
+    let (s, mock) = setup_with_mock_token();
+    let (boss, staff, id) = funded_schedule(&s, 1_000 * USDC, 100 * USDC);
+    mock.set_unpayable(&s.fee_recipient);
+
+    assert_eq!(
+        s.client.try_disburse(&id),
+        Err(Err(InvokeError::Contract(MockTokenError::Unpayable as u32)))
+    );
+    assert_eq!(s.client.escrow_of(&boss), 1_000 * USDC);
+    assert_eq!(next_due_of(&s, id), START);
+    assert_eq!(s.token.balance(&staff), 0);
+    assert_eq!(s.token.balance(&s.contract), 1_000 * USDC);
 }
 
 // ---- employer pause / resume / cancel (L4) ---------------------------------------------
@@ -1343,6 +1601,7 @@ fn every_state_change_emits_its_event() {
             schedule_id: 1,
             amount: 100 * USDC,
             escrow: 40 * USDC,
+            reason: Symbol::new(&s.env, "insufficient_escrow"),
         }
     );
     expect_event!(
