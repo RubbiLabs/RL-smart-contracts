@@ -560,16 +560,16 @@ Network passphrase `Test SDF Network ; September 2015`, RPC
 |---|---|
 | USDC issuer | `GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5` |
 | USDC SAC | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
-| vault | `TODO: contract id` (wasm `TODO: hash`) |
-| subscriptions | `TODO: contract id` (wasm `TODO: hash`) |
-| payroll | `TODO: contract id` (wasm `TODO: hash`) |
-| admin | `TODO: G...` |
-| operator | `TODO: G...` |
-| treasury | `TODO: G...` |
-| keeper | `TODO: G...` |
-| fee recipient | `TODO: G...` |
+| vault | [`CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR`](https://stellar.expert/explorer/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) (wasm `6b32de5ccff8f0fc28096e4e5b7ce9b16a1cbc997f4d0fa0c561aef4ec28e387`) |
+| subscriptions | [`CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC`](https://stellar.expert/explorer/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) (wasm `e194e739736bc1d562e247088210b34209fdfeceed580d4514a226116feecc44`) |
+| payroll | [`CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU`](https://stellar.expert/explorer/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) (wasm `ee0d2b3d64c09bb0a123f4ca60c05ea5e92ca7a265e0b225460a0b0202f6cd50`) |
+| admin | [`GCW4BXKRNKDICUSCI3RVP3MYTPQWMZ7ABCGAF5CZIWZ22U6TBIRDYE6G`](https://stellar.expert/explorer/testnet/account/GCW4BXKRNKDICUSCI3RVP3MYTPQWMZ7ABCGAF5CZIWZ22U6TBIRDYE6G) |
+| operator | [`GASCJCM7CLBWKKJ7UKXISRX67YRQD2EVL57YKPRCCTTECEZQYRJEPNXN`](https://stellar.expert/explorer/testnet/account/GASCJCM7CLBWKKJ7UKXISRX67YRQD2EVL57YKPRCCTTECEZQYRJEPNXN) |
+| treasury | [`GDRCO5PHUXNGQSM5CB752AWDCYID2VCCCUNF2QVA3GAWV7UB6QMEB4T5`](https://stellar.expert/explorer/testnet/account/GDRCO5PHUXNGQSM5CB752AWDCYID2VCCCUNF2QVA3GAWV7UB6QMEB4T5) |
+| keeper | [`GAL5BE6C7TTJXOZ2OIZXDTJX6K56ZOBUGEFOF3GE2OQUXACSA34N3WSQ`](https://stellar.expert/explorer/testnet/account/GAL5BE6C7TTJXOZ2OIZXDTJX6K56ZOBUGEFOF3GE2OQUXACSA34N3WSQ) |
+| fee recipient | [`GCW2OS4LNJZAK2EUQR7GFCBL7U57UDKHPOFFUONBHGJKUX24AUF7ZZIC`](https://stellar.expert/explorer/testnet/account/GCW2OS4LNJZAK2EUQR7GFCBL7U57UDKHPOFFUONBHGJKUX24AUF7ZZIC) |
 | fee_bps (subscriptions, payroll) | 50 |
-| deployed at / commit | `TODO` |
+| deployed at / commit | 2026-10-27T20:01:21Z / [`2136695`](https://github.com/RubbiLabs/RL-smart-contracts/commit/2136695771f247cb18082bf2348dc8cd37e765d2) |
 
 Browse contracts on [stellar.expert (testnet)](https://stellar.expert/explorer/testnet)
 or query them with `stellar contract invoke --network testnet --send=no`.
