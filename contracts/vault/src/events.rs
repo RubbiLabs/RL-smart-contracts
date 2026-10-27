@@ -45,3 +45,51 @@ pub struct RefundCredited {
     pub amount: i128,
     pub reference: BytesN<32>,
 }
+
+/// `operator_set`: the admin rotated the operator role.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorSet {
+    pub operator: Address,
+}
+
+/// `treasury_set`: the admin rotated the treasury role.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasurySet {
+    pub treasury: Address,
+}
+
+/// `admin_proposed`: the admin proposed `pending_admin` as the next admin.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminProposed {
+    #[topic]
+    pub pending_admin: Address,
+}
+
+/// `admin_transferred`: `new_admin` accepted the role from `old_admin`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferred {
+    #[topic]
+    pub new_admin: Address,
+    pub old_admin: Address,
+}
+
+/// `paused`: deposits and settlements are blocked until `unpaused`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Paused {}
+
+/// `unpaused`: normal operation resumed.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Unpaused {}
+
+/// `upgraded`: the contract executable will be replaced by `wasm_hash`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Upgraded {
+    pub wasm_hash: BytesN<32>,
+}

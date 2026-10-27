@@ -9,7 +9,8 @@ use soroban_sdk::{
         MockAuthInvoke,
     },
     token::{StellarAssetClient, TokenClient},
-    Address, BytesN, Env, Event as _, IntoVal, Symbol,
+    xdr::ScErrorType,
+    Address, BytesN, ConversionError, Env, Event as _, IntoVal, InvokeError, Symbol,
 };
 
 use crate::{events, Error, VaultContract, VaultContractClient};
@@ -65,6 +66,16 @@ fn funded_user(s: &Setup, amount: i128) -> Address {
     s.env.mock_all_auths();
     s.token_admin.mint(&user, &amount);
     user
+}
+
+/// Whether a `try_*` call to a function *without* a contract error type
+/// (returning `()`) failed with a host error such as a failed
+/// `require_auth`. Functions returning `Result<_, Error>` surface the same
+/// failure as `Err(Err(_))` instead, and tests match on that directly.
+fn is_host_error<T: core::fmt::Debug>(
+    res: &Result<Result<T, ConversionError>, Result<soroban_sdk::Error, InvokeError>>,
+) -> bool {
+    matches!(res, Err(Ok(e)) if !e.is_type(ScErrorType::Contract))
 }
 
 /// A deterministic 32-byte reference.
@@ -567,4 +578,348 @@ fn settle_and_refund_emit_events() {
         }
         .to_xdr(&s.env, &s.vault)]
     );
+}
+
+// ---- auth helper for argument-less admin calls --------------------------------
+
+/// Mock `signer` authorizing `fn_name` on the vault with `args`.
+fn mock_auth_for(
+    s: &Setup,
+    signer: &Address,
+    fn_name: &str,
+    args: soroban_sdk::Vec<soroban_sdk::Val>,
+) {
+    s.env.mock_auths(&[MockAuth {
+        address: signer,
+        invoke: &MockAuthInvoke {
+            contract: &s.vault,
+            fn_name,
+            args,
+            sub_invokes: &[],
+        },
+    }]);
+}
+
+// ---- 6. pause blocks deposit and settle, allows withdraw ----------------------
+
+#[test]
+fn pause_blocks_deposit_and_settle_but_allows_withdraw_and_refund() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &80);
+    s.token_admin.mint(&s.treasury, &500);
+
+    s.client.pause();
+    assert!(s.client.is_paused());
+
+    assert_eq!(s.client.try_deposit(&user, &10), Err(Ok(Error::Paused)));
+    assert_eq!(
+        s.client
+            .try_settle_card_spend(&user, &10, &reference(&s, 1)),
+        Err(Ok(Error::Paused))
+    );
+    // Users can always get their money out.
+    s.client.withdraw(&user, &30);
+    assert_eq!(s.client.balance(&user), 50);
+    assert_eq!(s.token.balance(&user), 50);
+    // Refunds in favour of users are not blocked either.
+    s.client.credit_refund(&user, &5, &reference(&s, 2));
+    assert_eq!(s.client.balance(&user), 55);
+
+    s.client.unpause();
+    assert!(!s.client.is_paused());
+    s.client.deposit(&user, &10);
+    s.client.settle_card_spend(&user, &10, &reference(&s, 1));
+    assert_eq!(s.client.balance(&user), 55);
+}
+
+// ---- 15. pause / unpause are admin-only ---------------------------------------
+
+#[test]
+fn pause_and_unpause_require_exact_admin_auth() {
+    let s = setup();
+    s.env.mock_all_auths();
+
+    s.client.pause();
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            s.admin.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    symbol_short!("pause"),
+                    ().into_val(&s.env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    s.client.unpause();
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            s.admin.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    symbol_short!("unpause"),
+                    ().into_val(&s.env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+}
+
+#[test]
+fn pause_and_unpause_by_non_admin_fail() {
+    let s = setup();
+    for signer in [&s.operator, &s.treasury, &Address::generate(&s.env)] {
+        mock_auth_for(&s, signer, "pause", ().into_val(&s.env));
+        assert!(is_host_error(&s.client.try_pause()));
+    }
+    s.env.mock_all_auths();
+    assert!(!s.client.is_paused());
+    s.client.pause();
+
+    for signer in [&s.operator, &s.treasury, &Address::generate(&s.env)] {
+        mock_auth_for(&s, signer, "unpause", ().into_val(&s.env));
+        assert!(is_host_error(&s.client.try_unpause()));
+    }
+    s.env.mock_all_auths();
+    assert!(s.client.is_paused());
+}
+
+// ---- 9. admin two-step transfer -----------------------------------------------
+
+#[test]
+fn admin_two_step_transfer() {
+    let s = setup();
+    s.env.mock_all_auths();
+    let new_admin = Address::generate(&s.env);
+
+    // Nothing pending: accept fails with a contract error.
+    assert_eq!(s.client.try_accept_admin(), Err(Ok(Error::NoPendingAdmin)));
+
+    // Only the admin can propose.
+    mock_auth_for(
+        &s,
+        &new_admin,
+        "propose_admin",
+        (new_admin.clone(),).into_val(&s.env),
+    );
+    assert!(is_host_error(&s.client.try_propose_admin(&new_admin)));
+    s.env.mock_all_auths();
+    assert_eq!(s.client.pending_admin(), None);
+
+    s.client.propose_admin(&new_admin);
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            s.admin.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    Symbol::new(&s.env, "propose_admin"),
+                    (new_admin.clone(),).into_val(&s.env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    assert_eq!(s.client.pending_admin(), Some(new_admin.clone()));
+    // The proposal changes nothing yet: the old admin still has rights.
+    assert_eq!(s.client.admin(), s.admin);
+
+    // Neither the old admin nor a stranger can accept on the proposed
+    // admin's behalf.
+    for signer in [&s.admin, &Address::generate(&s.env)] {
+        mock_auth_for(&s, signer, "accept_admin", ().into_val(&s.env));
+        assert!(matches!(s.client.try_accept_admin(), Err(Err(_))));
+    }
+
+    // The proposed admin accepts.
+    mock_auth_for(&s, &new_admin, "accept_admin", ().into_val(&s.env));
+    s.client.accept_admin();
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            new_admin.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    Symbol::new(&s.env, "accept_admin"),
+                    ().into_val(&s.env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    assert_eq!(s.client.admin(), new_admin);
+    assert_eq!(s.client.pending_admin(), None);
+
+    // The old admin lost its rights; the new admin has them.
+    mock_auth_for(&s, &s.admin, "pause", ().into_val(&s.env));
+    assert!(is_host_error(&s.client.try_pause()));
+    mock_auth_for(&s, &new_admin, "pause", ().into_val(&s.env));
+    s.client.pause();
+    s.env.mock_all_auths();
+    assert!(s.client.is_paused());
+}
+
+// ---- 13. set_operator / set_treasury ------------------------------------------
+
+#[test]
+fn set_operator_and_set_treasury_are_admin_only_and_take_effect() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &100);
+    let new_operator = Address::generate(&s.env);
+    let new_treasury = Address::generate(&s.env);
+
+    for signer in [&s.operator, &s.treasury, &new_operator] {
+        mock_auth_for(
+            &s,
+            signer,
+            "set_operator",
+            (new_operator.clone(),).into_val(&s.env),
+        );
+        assert!(is_host_error(&s.client.try_set_operator(&new_operator)));
+        mock_auth_for(
+            &s,
+            signer,
+            "set_treasury",
+            (new_treasury.clone(),).into_val(&s.env),
+        );
+        assert!(is_host_error(&s.client.try_set_treasury(&new_treasury)));
+    }
+    s.env.mock_all_auths();
+    assert_eq!(s.client.operator(), s.operator);
+    assert_eq!(s.client.treasury(), s.treasury);
+
+    s.client.set_operator(&new_operator);
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            s.admin.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    Symbol::new(&s.env, "set_operator"),
+                    (new_operator.clone(),).into_val(&s.env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    s.client.set_treasury(&new_treasury);
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            s.admin.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    Symbol::new(&s.env, "set_treasury"),
+                    (new_treasury.clone(),).into_val(&s.env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    assert_eq!(s.client.operator(), new_operator);
+    assert_eq!(s.client.treasury(), new_treasury);
+
+    // The old operator can no longer settle; the new one can, and the
+    // settlement goes to the new treasury.
+    let r = reference(&s, 1);
+    mock_auth_for(
+        &s,
+        &s.operator,
+        "settle_card_spend",
+        (user.clone(), 40_i128, r.clone()).into_val(&s.env),
+    );
+    assert!(matches!(
+        s.client.try_settle_card_spend(&user, &40, &r),
+        Err(Err(_))
+    ));
+    mock_auth_for(
+        &s,
+        &new_operator,
+        "settle_card_spend",
+        (user.clone(), 40_i128, r.clone()).into_val(&s.env),
+    );
+    s.client.settle_card_spend(&user, &40, &r);
+    s.env.mock_all_auths();
+    assert_eq!(s.token.balance(&new_treasury), 40);
+    assert_eq!(s.token.balance(&s.treasury), 0);
+}
+
+// ---- 10. upgrade is admin-only ------------------------------------------------
+
+#[test]
+fn upgrade_by_non_admin_fails() {
+    let s = setup();
+    let fake_hash = BytesN::from_array(&s.env, &[0xAB; 32]);
+    for signer in [&s.operator, &s.treasury, &Address::generate(&s.env)] {
+        mock_auth_for(&s, signer, "upgrade", (fake_hash.clone(),).into_val(&s.env));
+        assert!(is_host_error(&s.client.try_upgrade(&fake_hash)));
+    }
+    // The contract still runs its original code.
+    s.env.mock_all_auths();
+    assert_eq!(s.client.admin(), s.admin);
+}
+
+/// Positive upgrade path. Uploads this contract's own optimized wasm
+/// (built by `stellar contract build`) and upgrades to it, which exercises
+/// the full admin-authorized `update_current_contract` path.
+#[cfg(feature = "wasm-upgrade-test")]
+#[test]
+fn upgrade_by_admin_replaces_the_executable() {
+    const WASM: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/wasm32v1-none/release/rubbi_vault.wasm"
+    ));
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &100);
+
+    let wasm_hash = s
+        .env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&s.env, WASM));
+
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "upgrade",
+        (wasm_hash.clone(),).into_val(&s.env),
+    );
+    s.client.upgrade(&wasm_hash);
+    assert_eq!(
+        s.env.auths(),
+        std::vec![(
+            s.admin.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    s.vault.clone(),
+                    symbol_short!("upgrade"),
+                    (wasm_hash.clone(),).into_val(&s.env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.vault),
+        [events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.vault)]
+    );
+
+    // Storage survived and the (now wasm) contract still works.
+    s.env.mock_all_auths();
+    assert_eq!(s.client.admin(), s.admin);
+    assert_eq!(s.client.balance(&user), 100);
+    s.client.withdraw(&user, &100);
+    assert_eq!(s.token.balance(&user), 100);
 }

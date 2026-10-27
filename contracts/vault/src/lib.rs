@@ -22,7 +22,7 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, ContractExecutable, Env};
 
 pub use errors::Error;
 
@@ -186,6 +186,115 @@ impl VaultContract {
         }
         .publish(&env);
         Ok(())
+    }
+
+    // ---- admin: roles ------------------------------------------------------
+
+    /// Replace the operator.
+    ///
+    /// Auth: admin. Errors: none. Events: `operator_set`.
+    pub fn set_operator(env: Env, new_operator: Address) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        storage::set_operator(&env, &new_operator);
+        events::OperatorSet {
+            operator: new_operator,
+        }
+        .publish(&env);
+    }
+
+    /// Replace the treasury. Future settlements go to the new treasury and
+    /// future refunds must be authorized by it.
+    ///
+    /// Auth: admin. Errors: none. Events: `treasury_set`.
+    pub fn set_treasury(env: Env, new_treasury: Address) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        storage::set_treasury(&env, &new_treasury);
+        events::TreasurySet {
+            treasury: new_treasury,
+        }
+        .publish(&env);
+    }
+
+    // ---- admin: two-step transfer ------------------------------------------
+
+    /// Propose `new_admin` as the next admin. Nothing changes until the
+    /// proposed admin calls `accept_admin`. Proposing again replaces the
+    /// pending proposal.
+    ///
+    /// Auth: admin. Errors: none. Events: `admin_proposed`.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        storage::set_pending_admin(&env, &new_admin);
+        events::AdminProposed {
+            pending_admin: new_admin,
+        }
+        .publish(&env);
+    }
+
+    /// Accept a pending admin proposal and become the admin.
+    ///
+    /// Auth: the pending admin.
+    /// Errors: `NoPendingAdmin` when nothing is pending.
+    /// Events: `admin_transferred`.
+    pub fn accept_admin(env: Env) -> Result<(), Error> {
+        let pending = storage::get_pending_admin(&env).ok_or(Error::NoPendingAdmin)?;
+        pending.require_auth();
+        storage::extend_instance(&env);
+
+        let old_admin = storage::get_admin(&env);
+        storage::set_admin(&env, &pending);
+        storage::clear_pending_admin(&env);
+
+        events::AdminTransferred {
+            new_admin: pending,
+            old_admin,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    // ---- admin: pause and upgrade ------------------------------------------
+
+    /// Pause the vault: `deposit` and `settle_card_spend` are blocked.
+    /// `withdraw` and `credit_refund` keep working, so users are never
+    /// locked out of their funds.
+    ///
+    /// Auth: admin. Errors: none. Events: `paused`.
+    pub fn pause(env: Env) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        storage::set_paused(&env, true);
+        events::Paused {}.publish(&env);
+    }
+
+    /// Resume normal operation after `pause`.
+    ///
+    /// Auth: admin. Errors: none. Events: `unpaused`.
+    pub fn unpause(env: Env) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        storage::set_paused(&env, false);
+        events::Unpaused {}.publish(&env);
+    }
+
+    /// Replace the contract code with the already-uploaded wasm identified
+    /// by `new_wasm_hash`. Storage is kept; the new code takes effect after
+    /// this invocation completes.
+    ///
+    /// Auth: admin. Errors: none (the host fails if the wasm is not
+    /// uploaded). Events: `upgraded`.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        env.deployer()
+            .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+        events::Upgraded {
+            wasm_hash: new_wasm_hash,
+        }
+        .publish(&env);
     }
 
     // ---- reads -------------------------------------------------------------

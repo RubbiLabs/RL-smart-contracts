@@ -9,9 +9,6 @@
 //!
 //! No `temporary()` storage is used.
 
-// TODO(phase-1): remove once every accessor is used by the contract functions.
-#![allow(dead_code)]
-
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 /// Ledgers per day. Stellar closes a ledger roughly every 5 seconds
