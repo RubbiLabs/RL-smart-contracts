@@ -15,6 +15,32 @@ of that product:
 The backend lives in [RL-api](https://github.com/RubbiLabs/RL-api) and the
 web app in [RL-frontend](https://github.com/RubbiLabs/RL-frontend).
 
+## How the Rubbi repositories fit together
+
+Rubbi is three repositories under the [RubbiLabs](https://github.com/RubbiLabs) organisation. Nothing moves money except a transaction signed by the user's own wallet or by one of the backend's narrowly scoped keys.
+
+| Repository | Role | Talks to |
+|---|---|---|
+| **RL-smart-contracts (this repository)** | Soroban contracts on Stellar: vault (Rubbi wallet and card funding), subscriptions (allowance-based recurring payments), payroll (employer escrow) | USDC on Stellar; called by users' wallets and by the backend keys |
+| [RL-api](https://github.com/RubbiLabs/RL-api) | Backend: SEP-10 sign-in, event indexer that mirrors contract events into Postgres, keeper that runs due charges and payroll, card loading and unloading, card issuer adapter | Stellar RPC and the three contracts; serves the frontend over REST |
+| [RL-frontend](https://github.com/RubbiLabs/RL-frontend) | Next.js web app: wallet connection (Stellar Wallets Kit), sign-in, wallet and card, subscriptions, payroll | users' wallets (signing), the contracts (direct calls), the API (REST + JWT) |
+
+```mermaid
+flowchart LR
+  W[User wallet] -->|connect, sign| FE[RL-frontend]
+  FE -->|signed transactions| C[Soroban contracts<br/>vault · subscriptions · payroll]
+  FE -->|REST, SEP-10 JWT| API[RL-api]
+  API -->|keeper: charge_batch / disburse_batch<br/>operator: load card<br/>treasury: unload card| C
+  C -.->|events via the indexer| API
+  API -->|fund / defund card| ISS[Card issuer]
+```
+
+- **A user action.** A deposit is signed in the user's wallet and lands in the vault contract; the indexer sees the `deposit` event and records it; the app shows the new balance.
+- **A recurring payment.** When a subscription or salary falls due, the keeper calls `charge_batch` or `disburse_batch`. Anyone could make that call, but nobody can charge early or twice: the contracts are time-gated and pay exactly one period.
+- **Where to start.** The contracts if you write Rust/Soroban, the API for a TypeScript backend, the frontend for React.
+
+Other repositories: [RL-api](https://github.com/RubbiLabs/RL-api) and [RL-frontend](https://github.com/RubbiLabs/RL-frontend). Organisation: https://github.com/RubbiLabs.
+
 ## Why Stellar
 
 - **Native USDC.** Circle issues USDC on Stellar as a first-class asset
@@ -86,6 +112,21 @@ USDC from a user's vault balance to the treasury when that user loads the card
 (operator key) and back when the card is unloaded (treasury key), and (c)
 mirrors contract events into its database for the app's lists and history.
 Card purchases themselves happen off-chain against the loaded card balance.
+
+## Deployed contract addresses
+
+### Stellar Testnet
+
+`deployments/testnet.json` is the source of truth for these ids; the table is copied from it.
+
+| Contract | Address | Explorer |
+|---|---|---|
+| vault | `CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR` | [View](https://stellar.expert/explorer/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) |
+| subscriptions | `CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC` | [View](https://stellar.expert/explorer/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) |
+| payroll | `CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU` | [View](https://stellar.expert/explorer/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) |
+| USDC (Circle testnet, Stellar Asset Contract) | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` | [View](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA) |
+
+The activity you see on these pages is produced by `scripts/demo-testnet.sh` with dedicated demo accounts on testnet only, not by real users; see [Testnet activity](#testnet-activity). Roles, wasm hashes and the deploying commit are under [Deployment details](#deployment-details).
 
 ## Conventions shared by all three contracts
 
@@ -557,7 +598,7 @@ prints or logs a secret key. Nothing in this repository contains a key.
    stellar tx new change-trust --source-account <payee-identity> --line USDC:<issuer> --network testnet
    ```
 
-## Testnet deployments
+## Deployment details
 
 Network passphrase `Test SDF Network ; September 2015`, RPC
 `https://soroban-testnet.stellar.org`.
