@@ -16,6 +16,16 @@ pub struct MerchantAdded {
     pub payout: Address,
 }
 
+/// `merchant_payout_set`: `merchant` updated its payout address from `old` to `new`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantPayoutSet {
+    #[topic]
+    pub merchant: Address,
+    pub old: Address,
+    pub new: Address,
+}
+
 /// `merchant_active_set`: the admin (de)activated `merchant`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
