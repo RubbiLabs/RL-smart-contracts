@@ -1,0 +1,43 @@
+{
+  "network": "testnet",
+  "purpose": "demo accounts exercising the Rubbi testnet contracts; not real users",
+  "contracts": {
+    "vault": "CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR",
+    "subscriptions": "CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC",
+    "payroll": "CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU"
+  },
+  "identities": {
+    "demo-user": {
+      "address": "GBVURBT5SGUBGKB7YP27LLDPPQHN5NUUG3MLJESWSMR6ANCNISPWT4EJ",
+      "link": "https://stellar.expert/explorer/testnet/account/GBVURBT5SGUBGKB7YP27LLDPPQHN5NUUG3MLJESWSMR6ANCNISPWT4EJ"
+    },
+    "demo-merchant": {
+      "address": "GDKM57Q3MDNHE7ZTZBT36LER7S7PE3KWBX656RJ2GUAJ5UBXFAYIMQUS",
+      "link": "https://stellar.expert/explorer/testnet/account/GDKM57Q3MDNHE7ZTZBT36LER7S7PE3KWBX656RJ2GUAJ5UBXFAYIMQUS"
+    },
+    "demo-staff": {
+      "address": "GCVZT3EXYTNHU377WX4NR7FWTVVVPRDJS6Y6BAIBOB7UYUEFLL6GYRXJ",
+      "link": "https://stellar.expert/explorer/testnet/account/GCVZT3EXYTNHU377WX4NR7FWTVVVPRDJS6Y6BAIBOB7UYUEFLL6GYRXJ"
+    }
+  },
+  "plan_id": "1",
+  "sub_id": "1",
+  "schedule_id": "1",
+  "last_run": {
+    "id": "20261028T032451Z-81569",
+    "mode": "day1",
+    "started_at": "2026-10-28T03:24:51Z",
+    "finished_at": "2026-10-28T03:26:50Z",
+    "spend_reference": "1a5ce36fb1b1bd756140177c11f85ed35d55f5a9f5357d5c34550e051aafff1c",
+    "refund_reference": "be28c0e7ec549bd136f25e4ce591b38742013711b605b2f323cb5c93f6ca7a1b",
+    "transactions": []
+  },
+  "runs": [
+    {
+      "id": "20261028T032451Z-81569",
+      "mode": "day1",
+      "finished_at": "2026-10-28T03:26:50Z",
+      "transactions": 0
+    }
+  ]
+}
