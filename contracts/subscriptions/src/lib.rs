@@ -164,6 +164,30 @@ impl SubscriptionsContract {
         Ok(())
     }
 
+    /// Update the payout address of `merchant` for future subscription charges.
+    ///
+    /// Auth: `merchant` (the merchant address, not the admin).
+    /// Errors: `MerchantNotFound`, `PayoutUnavailable`.
+    /// Events: `merchant_payout_set`.
+    pub fn set_merchant_payout(env: Env, merchant: Address, payout: Address) -> Result<(), Error> {
+        merchant.require_auth();
+        let mut record = storage::get_merchant(&env, &merchant).ok_or(Error::MerchantNotFound)?;
+        if !payout_available(&env, &payout) {
+            return Err(Error::PayoutUnavailable);
+        }
+        let old = record.payout.clone();
+        record.payout = payout.clone();
+        storage::extend_instance(&env);
+        storage::set_merchant(&env, &merchant, &record);
+        events::MerchantPayoutSet {
+            merchant,
+            old,
+            new: payout,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Activate or deactivate `merchant`. An inactive merchant cannot create
     /// plans or take new subscribers, and its existing subscriptions are
     /// skipped by `charge` until it is reactivated.
