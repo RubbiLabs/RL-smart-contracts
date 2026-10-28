@@ -1,0 +1,60 @@
+name: Wave task (maintainers)
+description: A scoped task for the Drips Wave programme. Maintainers use this to publish work that outside contributors can claim.
+title: "[Wave] "
+labels: ["Stellar Wave"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One task per issue. A contributor must be able to finish it from the text below alone;
+        the acceptance criteria are the definition of done. No typo-level or comment-only tasks.
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this matters for Rubbi users or maintainers, and what exists today.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What to build or change, precisely. Name functions, routes, pages and files.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: A testable checklist. Each line should be something a reviewer can verify.
+      value: |
+        - [ ] 
+        - [ ] 
+        - [ ] All existing checks stay green (see CONTRIBUTING.md)
+    validations:
+      required: true
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Complexity
+      description: Trivial = a few hours, self-contained. Medium = a few days, touches several files or one subsystem. High = a week or more, design decisions involved.
+      options:
+        - Trivial
+        - Medium
+        - High
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: What a pull request for this issue must not include.
+  - type: textarea
+    id: files
+    attributes:
+      label: Files likely touched
+  - type: textarea
+    id: hints
+    attributes:
+      label: Hints and references
+      description: Docs, similar code, decisions already made.

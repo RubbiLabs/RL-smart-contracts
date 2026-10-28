@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  contracts:
+    name: fmt, clippy, test, wasm build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Installs the toolchain, target and components pinned in
+      # rust-toolchain.toml and caches ~/.cargo and target/.
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          rustflags: ""
+
+      - name: Install stellar-cli 28.1.0
+        uses: stellar/stellar-cli@v28.1.0
+
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          stellar --version
+
+      - name: Shellcheck scripts
+        run: shellcheck scripts/*.sh
+
+      - name: README error tables match errors.rs
+        run: scripts/check-readme-errors.sh
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build contracts (wasm32v1-none)
+        run: stellar contract build
+
+      - name: Test upgrade paths against the built wasm
+        run: |
+          cargo test -p rubbi-vault --features wasm-upgrade-test
+          cargo test -p rubbi-subscriptions --features wasm-upgrade-test
+          cargo test -p rubbi-payroll --features wasm-upgrade-test
+
+      - name: Upload wasm artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: contracts-wasm
+          path: target/wasm32v1-none/release/*.wasm
+          if-no-files-found: error

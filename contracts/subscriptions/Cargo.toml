@@ -1,0 +1,23 @@
+[package]
+name = "rubbi-subscriptions"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Rubbi subscriptions: allowance-based recurring USDC payments on Soroban"
+license = "MIT"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[features]
+# Enables the positive upgrade-path test, which uploads the contract's own
+# wasm (target/wasm32v1-none/release/rubbi_subscriptions.wasm). Run
+# `stellar contract build` first.
+wasm-upgrade-test = []
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
