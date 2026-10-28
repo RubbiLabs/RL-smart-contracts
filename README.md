@@ -8,7 +8,7 @@ of that product:
 
 | Contract | Purpose | Custody |
 |---|---|---|
-| [`vault`](contracts/vault) | USDC balance that funds the user's card; card spends are settled on-chain by Rubbi's operator | custodial (card funding only) |
+| [`vault`](contracts/vault) | the user's Rubbi wallet: a USDC balance from which the card is loaded; loads and unloads are settled on-chain by Rubbi's operator and treasury | custodial (card funding only) |
 | [`subscriptions`](contracts/subscriptions) | recurring subscription and bill payments pulled from the subscriber's own wallet | non-custodial (bounded, expiring allowance) |
 | [`payroll`](contracts/payroll) | employer-funded escrow that pays recurring salaries | employer escrow |
 
@@ -54,7 +54,7 @@ flowchart LR
 
   subgraph Backend["Rubbi backend (RL-api)"]
     KEEPER[keeper key<br/>charge_batch / disburse_batch]
-    OPERATOR[operator key<br/>settle_card_spend]
+    OPERATOR[operator / treasury keys<br/>settle_card_spend = load card<br/>credit_refund = unload card]
     INDEXER[event indexer<br/>getEvents, cursor-based]
     CARD[card issuer adapter]
   end
@@ -71,8 +71,8 @@ flowchart LR
 
   KEEPER -- time-gated, permissionless --> S
   KEEPER -- time-gated, permissionless --> P
-  CARD -- card spend webhook --> OPERATOR
-  OPERATOR -- user balance → treasury --> V
+  CARD -- load / unload requests --> OPERATOR
+  OPERATOR -- user vault ⇄ treasury --> V
 
   V -. events .-> INDEXER
   S -. events .-> INDEXER
@@ -81,9 +81,11 @@ flowchart LR
 
 Money never sits in the backend. The frontend talks to the contracts directly
 with the user's wallet; the backend only (a) calls the permissionless,
-time-gated `charge_batch` / `disburse_batch` with its keeper key, (b) settles
-card spends with its operator key, and (c) mirrors contract events into its
-database for the app's lists and history.
+time-gated `charge_batch` / `disburse_batch` with its keeper key, (b) moves
+USDC from a user's vault balance to the treasury when that user loads the card
+(operator key) and back when the card is unloaded (treasury key), and (c)
+mirrors contract events into its database for the app's lists and history.
+Card purchases themselves happen off-chain against the loaded card balance.
 
 ## Conventions shared by all three contracts
 
@@ -121,14 +123,17 @@ database for the app's lists and history.
 
 ### vault
 
-Custody for card funding. `__constructor(admin, operator, treasury, token)`.
+Custody for card funding: the user's Rubbi wallet. Users deposit USDC and
+withdraw it at any time. Loading the card moves USDC from the user's vault
+balance to the treasury (`settle_card_spend`, operator); unloading moves it
+back (`credit_refund`, treasury). `__constructor(admin, operator, treasury, token)`.
 
 | Function | Auth | Errors | Events |
 |---|---|---|---|
 | `deposit(user, amount)` | `user` | `InvalidAmount`, `Paused`, `Overflow` | `deposit` |
 | `withdraw(user, amount)` — allowed while paused | `user` | `InvalidAmount`, `InsufficientBalance` | `withdraw` |
-| `settle_card_spend(user, amount, reference: BytesN<32>)` — moves the user's balance to the treasury; `reference` is unique | operator | `InvalidAmount`, `Paused`, `DuplicateReference`, `InsufficientBalance`, `Overflow` | `card_spend_settled` |
-| `credit_refund(user, amount, reference: BytesN<32>)` — treasury → vault, credits the user; own reference namespace; allowed while paused | treasury | `InvalidAmount`, `DuplicateReference`, `Overflow` | `refund_credited` |
+| `settle_card_spend(user, amount, reference: BytesN<32>)` — move USDC from the user's vault to the treasury when the card is loaded; `reference` is unique | operator | `InvalidAmount`, `Paused`, `DuplicateReference`, `InsufficientBalance`, `Overflow` | `card_spend_settled` |
+| `credit_refund(user, amount, reference: BytesN<32>)` — move USDC back from the treasury into the user's vault when the card is unloaded; own reference namespace; allowed while paused | treasury | `InvalidAmount`, `DuplicateReference`, `Overflow` | `refund_credited` |
 | `set_operator(new_operator)` | admin | — | `operator_set` |
 | `set_treasury(new_treasury)` | admin | — | `treasury_set` |
 | `propose_admin(new_admin)` | admin | — | `admin_proposed` |
@@ -138,7 +143,7 @@ Custody for card funding. `__constructor(admin, operator, treasury, token)`.
 | `balance(user)`, `total_balances()`, `admin()`, `pending_admin()`, `operator()`, `treasury()`, `token()`, `is_paused()` | none | — | — |
 
 Invariant: `sum(balance(*)) == total_balances() == vault's USDC balance` as
-long as nobody transfers USDC to the vault directly. A failed settlement
+long as nobody transfers USDC to the vault directly. A failed load
 (e.g. insufficient balance) does not consume its reference.
 
 ### subscriptions
@@ -294,16 +299,17 @@ another's.
 |---|---|---|
 | admin | Rubbi (multisig recommended) | rotate operator / treasury, set fees (hard cap 10%) and fee recipient, allowlist merchants, pause / unpause, upgrade, hand over admin with a two-step transfer |
 | operator | Rubbi backend (hot key) | `settle_card_spend` only |
-| treasury | Rubbi | receives settled card spends; signs `credit_refund` |
+| treasury | Rubbi | receives card loads; signs `credit_refund` for unloads |
 | keeper | Rubbi backend (hot key) | nothing special: `charge_batch` and `disburse_batch` are permissionless and time-gated, the keeper just pays the fees |
 | fee recipient | Rubbi | receives the fee share of every charge and disbursement; no powers |
 
-**Custodial card settlement.** The vault is custodial for card funding: the
+**Custodial card loads.** The vault is custodial for card funding: the
 operator key can move *any* user's vault balance to the treasury via
-`settle_card_spend`. Users trust Rubbi's backend to settle only real card
-spends. Idempotent references and events make every settlement auditable,
-but they do not stop a compromised operator from draining vault balances up
-to each user's balance. Keep the operator key in the backend only, rotate it
+`settle_card_spend`, the on-chain half of loading the card. Users trust
+Rubbi's backend to call it only for loads they requested. Idempotent
+references and events make every load auditable, but they do not stop a
+compromised operator from draining vault balances up to each user's balance.
+Keep the operator key in the backend only, rotate it
 with `set_operator`, and keep the treasury key separate.
 
 **Users can always withdraw.** Pausing the vault blocks deposits and
@@ -494,8 +500,8 @@ prints or logs a secret key. Nothing in this repository contains a key.
    | Identity | Role |
    |---|---|
    | `rubbi-admin` | admin of all three contracts; signs the deployment |
-   | `rubbi-operator` | vault operator (card settlement) |
-   | `rubbi-treasury` | vault treasury (receives settlements, funds refunds) |
+   | `rubbi-operator` | vault operator (signs card loads) |
+   | `rubbi-treasury` | vault treasury (receives card loads, funds unloads) |
    | `rubbi-keeper` | backend key that calls `charge_batch` / `disburse_batch` (recorded, not used by the contracts) |
    | `rubbi-fees` | fee recipient of subscriptions and payroll |
 
@@ -594,15 +600,28 @@ or query them with `stellar contract invoke --network testnet --send=no`.
 └── .github/workflows/ci.yml     fmt, clippy, tests, wasm build, upgrade tests, shellcheck
 ```
 
-## Contributing
+## Contributing via Drips Wave
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for branch and commit conventions, the
-pull request checklist, test expectations and the policy on AI-assisted
-contributions. Rubbi takes part in the Stellar [Drips](https://www.drips.network/)
-Wave program: scoped issues labelled `Stellar Wave` are open to outside
-contributors. Please report security issues privately (see `SECURITY.md`)
-rather than in a public issue.
+Rubbi takes part in the Stellar Wave programme on
+[Drips](https://www.drips.network/): issues labelled **`Stellar Wave`** are
+scoped, paid tasks open to outside contributors. Each one states its Context,
+Scope, Acceptance criteria and Complexity (Trivial / Medium / High). To take
+one, comment on the issue to claim it, wait for a maintainer to assign it,
+then open a pull request that closes it with every acceptance criterion met
+and all checks green. One claimed issue per contributor at a time.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the setup, the branch and
+Conventional Commit rules, the pull request checklist, test expectations and
+the AI-assistance policy (tools are fine; you must understand, test and be
+able to explain every line, and low-effort generated pull requests are
+closed). Everyone taking part follows the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately per
+[SECURITY.md](SECURITY.md), never in a public issue.
+
+Related repositories: [RL-api](https://github.com/RubbiLabs/RL-api)
+(backend) and [RL-frontend](https://github.com/RubbiLabs/RL-frontend)
+(web app) use the same conventions and have their own Wave issues.
 
 ## License
 
-MIT.
+[MIT](LICENSE).
