@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a change to what Rubbi does.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who is affected and what can they not do today? Describe the situation, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change? Name the contract function, API route or page if you can.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - contracts (vault)
+        - contracts (subscriptions)
+        - contracts (payroll)
+        - backend (auth / users)
+        - backend (indexer / keeper)
+        - backend (cards)
+        - frontend
+        - docs / tooling
+  - type: checkboxes
+    id: wave
+    attributes:
+      label: Drips Wave
+      options:
+        - label: I would like to implement this myself if it becomes a `Stellar Wave` issue.
