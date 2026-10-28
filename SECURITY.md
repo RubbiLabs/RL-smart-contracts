@@ -9,12 +9,12 @@ weakness in these paths as sensitive.
 
 **Do not open a public issue or pull request for a security problem.**
 
-Report it privately through
-[GitHub Security Advisories](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
-on this repository ("Security" tab → "Report a vulnerability"). If you cannot
-use that form, contact the maintainers directly:
-
-- Security contact: **TODO(maintainers): add an email address or other private channel**
+Report it privately through GitHub's
+[private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability):
+open this repository's **Security** tab and choose **Report a vulnerability**,
+or go directly to <https://github.com/RubbiLabs/RL-smart-contracts/security/advisories/new>. This is the only
+reporting channel; public issues, pull requests and discussions must not be
+used for security problems.
 
 Include what you found, where (repository, file, function, deployed contract
 id), how to reproduce it, and what you think the impact is. A proof of concept

@@ -15,6 +15,8 @@ of that product:
 The backend lives in [RL-api](https://github.com/RubbiLabs/RL-api) and the
 web app in [RL-frontend](https://github.com/RubbiLabs/RL-frontend).
 
+**Try it:** web app <https://rubbilabs.vercel.app> (Stellar testnet), API <https://rubbi-api.onrender.com> (Render free tier; the first request may take up to a minute). Test funds: XLM from [Friendbot](https://lab.stellar.org/account/fund), testnet USDC from [Circle's faucet](https://faucet.circle.com).
+
 ## How the Rubbi repositories fit together
 
 Rubbi is three repositories under the [RubbiLabs](https://github.com/RubbiLabs) organisation. Nothing moves money except a transaction signed by the user's own wallet or by one of the backend's narrowly scoped keys.
