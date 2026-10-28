@@ -150,6 +150,16 @@ record_tx() {
     '. + [{step: $s, hash: $h, link: ($e + "/tx/" + $h)}]')"
 }
 
+# Transaction hash from the CLI's stderr. stellar-cli 28.1.0 logs
+# "ℹ️  Signing transaction: <64 hex>" for every transaction it signs (contract
+# invoke and tx new alike); older/newer builds may say "Transaction hash is".
+# Prints the last 64-hex hash found, or nothing.
+extract_tx_hash() {
+  printf '%s\n' "$1" \
+    | grep -E -o '(Signing transaction:|Transaction hash is) *[0-9a-f]{64}' \
+    | tail -n 1 | grep -E -o '[0-9a-f]{64}$' || true
+}
+
 # Run a state-changing CLI command. stdout (the return value) ends up in
 # LAST_RESULT, the transaction hash in LAST_HASH, the CLI's stderr in
 # LAST_STDERR. Returns the command's exit status. In dry-run mode the command
@@ -170,7 +180,7 @@ send_cmd() {
   LAST_RESULT="$("$@" 2>"$err")" || status=$?
   LAST_STDERR="$(cat "$err")"
   rm -f "$err"
-  LAST_HASH="$(printf '%s\n' "$LAST_STDERR" | grep -o 'Transaction hash is [0-9a-f]*' | tail -n 1 | awk '{print $NF}')"
+  LAST_HASH="$(extract_tx_hash "$LAST_STDERR")"
   if [ "$status" -ne 0 ]; then
     return "$status"
   fi
@@ -281,8 +291,8 @@ ensure_trustline() {
   case "$count" in
     0)
       log "$identity ($address) has no USDC trustline; creating it"
-      # `stellar tx new` does not log a transaction hash like `contract invoke`
-      # does, so the trustline is confirmed by reading the ledger afterwards.
+      # The hash is recorded when the CLI logs it; the trustline itself is
+      # confirmed by reading the ledger afterwards, so a missing hash is fine.
       WANT_HASH=0
       must_send "trustline-$identity" "" stellar tx new change-trust \
         --source-account "$identity" --line "USDC:$USDC_ISSUER" --network "$NETWORK"
