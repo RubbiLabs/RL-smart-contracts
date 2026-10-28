@@ -97,6 +97,21 @@ usage() {
 
 show_cmd() { printf '  $'; printf ' %q' "$@"; printf '\n'; }
 
+# Variants for functions whose stdout is captured by the caller: everything
+# that is not the returned value must go to stderr.
+log_err() { log "$@" >&2; }
+note_err() { note "$@" >&2; }
+show_cmd_err() { show_cmd "$@" >&2; }
+
+# A captured identity address must be a real G address, or (dry-run only) the
+# placeholder for an identity that does not exist yet.
+require_address() {
+  local what="$1" value="$2"
+  if is_g_address "$value"; then return 0; fi
+  if [ "$DRY_RUN" -eq 1 ] && is_placeholder "$value"; then return 0; fi
+  die "$what resolved to '$value', which is not a Stellar account address (G..., 56 chars)"
+}
+
 is_g_address() { [[ "$1" =~ ^G[A-Z2-7]{55}$ ]]; }
 is_c_address() { [[ "$1" =~ ^C[A-Z2-7]{55}$ ]]; }
 is_placeholder() { case "$1" in \<*\>) return 0 ;; *) return 1 ;; esac; }
@@ -140,6 +155,8 @@ record_tx() {
 # LAST_STDERR. Returns the command's exit status. In dry-run mode the command
 # is only printed and LAST_RESULT is set to the given placeholder.
 LAST_RESULT=""; LAST_HASH=""; LAST_STDERR=""
+# Set to 0 around commands that do not log a transaction hash.
+WANT_HASH=1
 send_cmd() {
   local step="$1" placeholder="$2"
   shift 2
@@ -160,7 +177,7 @@ send_cmd() {
   if [ -n "$LAST_HASH" ]; then
     note "tx: $EXPLORER/tx/$LAST_HASH"
     record_tx "$step" "$LAST_HASH"
-  else
+  elif [ "$WANT_HASH" -eq 1 ]; then
     warn "$step: no transaction hash found in the CLI output"
   fi
   return 0
@@ -229,18 +246,19 @@ refuse_protected() {
   return 0
 }
 
-# Create a demo identity when it does not exist. Prints its public key (or a
-# placeholder in dry-run mode when it does not exist yet).
+# Create a demo identity when it does not exist. The caller captures stdout,
+# so the ONLY thing written to stdout is the public key (or, in dry-run mode,
+# a placeholder for an identity that does not exist yet); logs go to stderr.
 ensure_identity() {
   local identity="$1" pk
   refuse_protected "$identity"
   if pk="$(public_key "$identity")" && is_g_address "$pk"; then
-    note "$identity exists: $pk"
+    note_err "$identity exists: $pk"
     printf '%s\n' "$pk"
     return 0
   fi
-  log "$identity is missing; creating and funding it with Friendbot" >&2
-  show_cmd stellar keys generate "$identity" --network "$NETWORK" --fund >&2
+  log_err "$identity is missing; creating and funding it with Friendbot"
+  show_cmd_err stellar keys generate "$identity" --network "$NETWORK" --fund
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '<%s-public-key>\n' "$identity"
     return 0
@@ -263,8 +281,18 @@ ensure_trustline() {
   case "$count" in
     0)
       log "$identity ($address) has no USDC trustline; creating it"
+      # `stellar tx new` does not log a transaction hash like `contract invoke`
+      # does, so the trustline is confirmed by reading the ledger afterwards.
+      WANT_HASH=0
       must_send "trustline-$identity" "" stellar tx new change-trust \
         --source-account "$identity" --line "USDC:$USDC_ISSUER" --network "$NETWORK"
+      WANT_HASH=1
+      if [ "$DRY_RUN" -eq 0 ]; then
+        count="$(usdc_trustline_count "$address")" \
+          || die "could not re-query the USDC trustline of $identity ($address)"
+        [ "$count" = "1" ] || die "trustline for $identity was submitted but is not on the ledger (lookup returned '$count')"
+        note "trustline confirmed: $identity trusts USDC:$USDC_ISSUER"
+      fi
       ;;
     1) note "$identity already trusts USDC:$USDC_ISSUER" ;;
     *) die "unexpected trustline lookup result for $identity: '$count'" ;;
@@ -328,6 +356,9 @@ log "Demo identities"
 USER_PK="$(ensure_identity "$USER_ID")"
 MERCHANT_PK="$(ensure_identity "$MERCHANT_ID")"
 STAFF_PK="$(ensure_identity "$STAFF_ID")"
+require_address "$USER_ID" "$USER_PK"
+require_address "$MERCHANT_ID" "$MERCHANT_PK"
+require_address "$STAFF_ID" "$STAFF_PK"
 
 # --------------------------------------------------------- 2. trustlines --
 log "USDC trustlines for the demo accounts"
