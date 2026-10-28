@@ -580,6 +580,34 @@ Network passphrase `Test SDF Network ; September 2015`, RPC
 Browse contracts on [stellar.expert (testnet)](https://stellar.expert/explorer/testnet)
 or query them with `stellar contract invoke --network testnet --send=no`.
 
+### Testnet activity
+
+The activity on the explorer pages above comes from `scripts/demo-testnet.sh`,
+which exercises every contract with three dedicated demo accounts
+(`demo-user`, `demo-merchant`, `demo-staff`). They are demo usage, not real
+users, and hold only testnet USDC from Circle's faucet. A run deposits to and
+withdraws from the vault, settles a card load and a refund with the operator
+and treasury keys, allowlists the demo merchant and creates a 1 USDC / day
+plan (once), approves and subscribes, funds payroll escrow, creates a 1 USDC /
+day salary schedule due 30 seconds later and disburses it. Ids, references
+and transaction hashes land in `deployments/testnet-demo.json` (commit it
+after a run), and every transaction is printed with its stellar.expert link.
+
+```sh
+scripts/demo-testnet.sh --dry-run   # print every command, submit nothing
+scripts/demo-testnet.sh             # day 1: creates demo identities if missing,
+                                    # stops with the faucet address if demo-user
+                                    # holds < 15 USDC, otherwise runs the flow
+scripts/demo-testnet.sh --day2      # a day later: charge the demo subscription and
+                                    # disburse the demo schedule (prints "not due
+                                    # yet" when run too early)
+```
+
+The script needs the `rubbi-admin`, `rubbi-operator` and `rubbi-treasury`
+identities in the CLI keystore and never reads or prints a secret key.
+Re-running day 1 reuses the recorded plan and subscription but creates a new
+salary schedule each time; `--day2` acts on the most recently recorded ids.
+
 ## Repository layout
 
 ```text
@@ -593,9 +621,11 @@ or query them with `stellar contract invoke --network testnet --send=no`.
 ├── scripts/
 │   ├── deploy-testnet.sh        build + deploy + deployments/testnet.json
 │   ├── smoke-testnet.sh         read-only checks of a deployment
+│   ├── demo-testnet.sh          exercise the testnet contracts with demo accounts
 │   └── check-readme-errors.sh   README error tables == errors.rs
 ├── deployments/
-│   └── testnet.example.json     shape of the deployment record
+│   ├── testnet.example.json     shape of the deployment record
+│   └── testnet-demo.json        ids and tx hashes written by demo-testnet.sh
 ├── legacy/evm/                  earlier Solidity implementation, kept for reference only
 └── .github/workflows/ci.yml     fmt, clippy, tests, wasm build, upgrade tests, shellcheck
 ```
