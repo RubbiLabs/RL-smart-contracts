@@ -651,6 +651,22 @@ identities in the CLI keystore and never reads or prints a secret key.
 Re-running day 1 reuses the recorded plan and subscription but creates a new
 salary schedule each time; `--day2` acts on the most recently recorded ids.
 
+### Source verification and release upgrades
+
+Tagged releases (`v*.*.*`) trigger `.github/workflows/release.yml`, building optimized contract WASM artifacts (`rubbi_vault.wasm`, `rubbi_subscriptions.wasm`, `rubbi_payroll.wasm`), computing sha256 checksums (`SHA256SUMS.txt`), and generating GitHub build provenance attestations so anyone can verify build transparency and link bytecode on [stellar.expert](https://stellar.expert).
+
+To verify that local deployment or release assets match:
+```sh
+scripts/verify-release.sh               # verify assets for tag in deployments/testnet.json
+scripts/verify-release.sh v0.1.0        # verify assets for an explicit release tag
+```
+
+To upgrade testnet contracts to matching release wasms:
+```sh
+scripts/upgrade-testnet.sh --dry-run    # simulate and print upgrade invocations
+scripts/upgrade-testnet.sh              # perform upgrades via rubbi-admin identity
+```
+
 ## Repository layout
 
 ```text
@@ -663,6 +679,8 @@ salary schedule each time; `--day2` acts on the most recently recorded ids.
 │   └── payroll/                 same layout
 ├── scripts/
 │   ├── deploy-testnet.sh        build + deploy + deployments/testnet.json
+│   ├── upgrade-testnet.sh       upgrade testnet contracts to release wasms
+│   ├── verify-release.sh        verify release wasms & checksums against deployments
 │   ├── smoke-testnet.sh         read-only checks of a deployment
 │   ├── demo-testnet.sh          exercise the testnet contracts with demo accounts
 │   └── check-readme-errors.sh   README error tables == errors.rs
@@ -670,7 +688,9 @@ salary schedule each time; `--day2` acts on the most recently recorded ids.
 │   ├── testnet.example.json     shape of the deployment record
 │   └── testnet-demo.json        ids and tx hashes written by demo-testnet.sh
 ├── legacy/evm/                  earlier Solidity implementation, kept for reference only
-└── .github/workflows/ci.yml     fmt, clippy, tests, wasm build, upgrade tests, shellcheck
+└── .github/workflows/
+    ├── ci.yml                   fmt, clippy, tests, wasm build, upgrade tests, shellcheck
+    └── release.yml              release wasm build, provenance attestation, github release
 ```
 
 ## Contributing via Drips Wave
