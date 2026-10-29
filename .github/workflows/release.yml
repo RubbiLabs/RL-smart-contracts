@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build, attest, and release Soroban contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          rustflags: ""
+
+      - name: Install stellar-cli 28.1.0
+        uses: stellar/stellar-cli@v28.1.0
+
+      - name: Verify tool versions
+        run: |
+          rustc --version
+          cargo --version
+          stellar --version
+
+      - name: Build contracts (wasm32v1-none)
+        run: stellar contract build
+
+      - name: Compute contract sha256 hashes
+        id: checksums
+        run: |
+          cd target/wasm32v1-none/release
+          sha256sum rubbi_vault.wasm rubbi_subscriptions.wasm rubbi_payroll.wasm > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "vault_hash=$(sha256sum rubbi_vault.wasm | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "subscriptions_hash=$(sha256sum rubbi_subscriptions.wasm | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "payroll_hash=$(sha256sum rubbi_payroll.wasm | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            target/wasm32v1-none/release/rubbi_vault.wasm
+            target/wasm32v1-none/release/rubbi_subscriptions.wasm
+            target/wasm32v1-none/release/rubbi_payroll.wasm
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/wasm32v1-none/release/rubbi_vault.wasm
+            target/wasm32v1-none/release/rubbi_subscriptions.wasm
+            target/wasm32v1-none/release/rubbi_payroll.wasm
+            target/wasm32v1-none/release/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            ### Rubbi Soroban Smart Contracts Release `${{ github.ref_name }}`
+
+            Built with `stellar-cli 28.1.0` and Rust `$(rustc --version)`.
+
+            #### Contract SHA-256 Checksums
+            - `rubbi_vault.wasm`: `${{ steps.checksums.outputs.vault_hash }}`
+            - `rubbi_subscriptions.wasm`: `${{ steps.checksums.outputs.subscriptions_hash }}`
+            - `rubbi_payroll.wasm`: `${{ steps.checksums.outputs.payroll_hash }}`
+
+            #### Verification
+            Recompute and verify released hashes locally:
+            ```bash
+            scripts/verify-release.sh ${{ github.ref_name }}
+            ```

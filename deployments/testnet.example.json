@@ -37,6 +37,7 @@
     "keeper": "G<rubbi-keeper>",
     "fee_recipient": "G<rubbi-fees>"
   },
+  "release_tag": "v0.1.0",
   "git_commit": "<commit the wasm was built from>",
   "git_dirty": false,
   "deployed_at": "<UTC ISO 8601, e.g. 2026-10-27T12:00:00Z>"
