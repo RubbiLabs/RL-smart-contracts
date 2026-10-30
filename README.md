@@ -211,7 +211,7 @@ pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32
 | `create_plan(merchant, name, amount, period) -> u32` | `merchant` (active) | `MerchantNotFound`, `MerchantInactive`, `NameTooLong`, `InvalidAmount`, `InvalidPeriod` | `plan_created` |
 | `set_plan_active(merchant, plan_id, active)` — deactivated plans take no new subscribers; existing ones keep running | `merchant` (plan owner) | `PlanNotFound`, `NotPlanOwner` | `plan_active_set` |
 | `subscribe(subscriber, plan_id) -> u64` — pulls the first period immediately; nothing is written if the pull fails or the payout address cannot receive USDC | `subscriber` | `Paused`, `PlanNotFound`, `PlanInactive`, `MerchantNotFound`, `MerchantInactive`, `AlreadySubscribed`, `PayoutUnavailable`, `PaymentFailed`, `Overflow` | `subscribed`, `charged` |
-| `charge(sub_id) -> bool` — one period if due; `false` + `PastDue` on a failed pull; `false` + nothing written (no pull, allowance untouched) for an inactive merchant or a payout address that cannot receive USDC | none | `Paused`, `SubscriptionNotFound`, `NotChargeable`, `NotDue`, `PlanNotFound`, `MerchantNotFound`, `Overflow` | `charged`, `charge_failed` or `charge_skipped` |
+| `charge(sub_id) -> bool` — one period if due; `false` + `PastDue` on a failed pull; `false` + nothing written (no pull, allowance untouched) for an inactive merchant or a payout address that cannot receive USDC; `false` + pulled amount refunded to subscriber if merchant payout transfer fails | none | `Paused`, `SubscriptionNotFound`, `NotChargeable`, `NotDue`, `PlanNotFound`, `MerchantNotFound`, `Overflow`, `PayoutFailed` | `charged`, `charge_failed` or `charge_skipped` |
 | `charge_batch(sub_ids) -> Vec<bool>` — per-item problems yield `false`, never fail the batch; one unpayable merchant never blocks the others | none | `BatchTooLarge`, `Paused` | as `charge`, per item |
 | `pause_subscription(subscriber, sub_id)` — allowed while the contract is paused | `subscriber` | `SubscriptionNotFound`, `NotSubscriber`, `NotPausable` | `subscription_paused` |
 | `resume_subscription(subscriber, sub_id)` — `next_due = max(next_due, now)`; allowed while paused | `subscriber` | `SubscriptionNotFound`, `NotSubscriber`, `NotPaused` | `subscription_resumed` |
@@ -470,7 +470,12 @@ without trustlines. Therefore:
   `charge`: a merchant whose payout address can no longer receive USDC makes
   the charge return `false` with `charge_skipped` (`payout_unavailable`),
   nothing pulled, the subscriber's allowance untouched, no `PastDue`, and
-  `next_due` unchanged. Charging resumes once the address can receive USDC.
+  `next_due` unchanged. If the payout address passed the check but its transfer
+  fails (for instance, the trustline limit would be exceeded), `pay_out`
+  refunds the pulled amount to the subscriber, emits `charge_skipped`
+  (`payout_failed`), and returns `false`, so that one merchant with a full
+  trustline never aborts a `charge_batch` for others. If even the refund transfer
+  fails, the call aborts with `PayoutFailed`. Charging resumes once the address can receive USDC.
 - every **payroll recipient** that is a regular account must have its USDC
   trustline open **before its first disbursement**. `disburse` pays the
   recipient with `try_transfer` before writing anything: a recipient that
