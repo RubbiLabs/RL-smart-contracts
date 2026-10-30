@@ -67,4 +67,7 @@ pub enum Error {
     /// The merchant's payout address cannot receive USDC: it has no USDC
     /// trustline, or the trustline is frozen.
     PayoutUnavailable = 24,
+    /// A merchant payout transfer failed after the subscriber's tokens were
+    /// pulled, and the refund transfer to the subscriber also failed.
+    PayoutFailed = 25,
 }

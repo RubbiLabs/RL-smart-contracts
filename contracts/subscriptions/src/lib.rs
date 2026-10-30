@@ -313,7 +313,12 @@ impl SubscriptionsContract {
         );
         storage::set_sub_id_of(&env, &subscriber, plan_id, id);
 
-        pay_out(&env, &merchant.payout, plan.amount, fee);
+        if pay_out(&env, &merchant.payout, plan.amount, fee).is_err() {
+            let this = env.current_contract_address();
+            let token = token::TokenClient::new(&env, &storage::get_token(&env));
+            let _ = token.try_transfer(&this, &subscriber, &plan.amount);
+            return Err(Error::PayoutFailed);
+        }
 
         events::Subscribed {
             subscriber: subscriber.clone(),
@@ -710,17 +715,21 @@ fn payout_available(env: &Env, payout: &Address) -> bool {
 }
 
 /// Pay `amount - fee` to `payout` and `fee` to the fee recipient out of the
-/// tokens this contract just pulled. Both are plain transfers: the payout
-/// address passed `payout_available` in the same invocation, and the fee
-/// recipient is admin-controlled with a trustline created by the deploy
-/// script.
-fn pay_out(env: &Env, payout: &Address, amount: i128, fee: i128) {
+/// tokens this contract just pulled. The payout address passed `payout_available`
+/// in the same invocation, but its transfer may still fail if its trustline
+/// limit would be exceeded. Returns `Err(())` if the merchant payout transfer
+/// fails. The fee recipient is admin-controlled with a trustline created by
+/// the deploy script, so fee transfer failure keeps aborting the call.
+fn pay_out(env: &Env, payout: &Address, amount: i128, fee: i128) -> Result<(), ()> {
     let token = token::TokenClient::new(env, &storage::get_token(env));
     let this = env.current_contract_address();
-    token.transfer(&this, payout, &(amount - fee));
+    token
+        .try_transfer(&this, payout, &(amount - fee))
+        .map_err(|_| ())?;
     if fee > 0 {
         token.transfer(&this, storage::get_fee_recipient(env), &fee);
     }
+    Ok(())
 }
 
 /// No back-charging: advance by one period; if that is still not in the
@@ -786,11 +795,24 @@ fn charge_one(env: &Env, sub_id: u64) -> Result<bool, Error> {
         return Ok(false);
     }
 
+    if pay_out(env, &merchant.payout, plan.amount, fee).is_err() {
+        let this = env.current_contract_address();
+        let token = token::TokenClient::new(env, &storage::get_token(env));
+        if token.try_transfer(&this, &sub.subscriber, &plan.amount).is_err() {
+            return Err(Error::PayoutFailed);
+        }
+        events::ChargeSkipped {
+            subscriber: sub.subscriber,
+            sub_id,
+            reason: Symbol::new(env, "payout_failed"),
+        }
+        .publish(env);
+        return Ok(false);
+    }
+
     sub.status = SubStatus::Active;
     sub.next_due = next_due;
     storage::set_subscription(env, &sub);
-
-    pay_out(env, &merchant.payout, plan.amount, fee);
 
     events::Charged {
         subscriber: sub.subscriber,
