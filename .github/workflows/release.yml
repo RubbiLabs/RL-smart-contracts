@@ -1,0 +1,63 @@
+name: Release
+
+# On a semver tag (vX.Y.Z), build each contract in GitHub Actions with Stellar
+# Expert's reusable workflow. For each package it runs
+# `stellar contract build --optimize` with stellar-cli 28.1.0, embeds
+# `source_repo=github:<this repository>` in the WASM metadata, publishes the
+# WASM as a release asset, sends the build to Stellar Expert for source
+# validation and creates a GitHub build attestation.
+#
+# Each package gets its own release, named
+# `<tag>_<package>_cli28.1.0` (e.g. `v0.1.0_rubbi-vault_cli28.1.0`) with
+# the asset `<package>_v<crate version>.wasm`. When the tag differs from
+# v<crate version>, the reusable workflow inserts `_pkg<version>` into the
+# release name, so keep the three crate versions equal to the tag.
+#
+# The reusable workflow creates the per-package release tags with
+# `gh release create`, which points a missing tag at the tip of the default
+# branch: push the vX.Y.Z tag on the current tip of main.
+#
+# Only vX.Y.Z tags trigger it; the legacy tag v0-evm-arbitrum does not match.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  id-token: write
+  contents: write
+  attestations: write
+
+jobs:
+  release-vault:
+    # Pinned to a commit (stellar-cli 28.1.0) for supply-chain safety; review
+    # the upstream diff before bumping.
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@6b16426dd3a61715ddddf83a2df322a6371fe071
+    with:
+      release_name: ${{ github.ref_name }}
+      package: rubbi-vault
+      release_description: "Attested build of rubbi-vault ${{ github.ref_name }}. Testnet only; not audited."
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
+
+  release-subscriptions:
+    # Pinned to a commit (stellar-cli 28.1.0) for supply-chain safety; review
+    # the upstream diff before bumping.
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@6b16426dd3a61715ddddf83a2df322a6371fe071
+    with:
+      release_name: ${{ github.ref_name }}
+      package: rubbi-subscriptions
+      release_description: "Attested build of rubbi-subscriptions ${{ github.ref_name }}. Testnet only; not audited."
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
+
+  release-payroll:
+    # Pinned to a commit (stellar-cli 28.1.0) for supply-chain safety; review
+    # the upstream diff before bumping.
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@6b16426dd3a61715ddddf83a2df322a6371fe071
+    with:
+      release_name: ${{ github.ref_name }}
+      package: rubbi-payroll
+      release_description: "Attested build of rubbi-payroll ${{ github.ref_name }}. Testnet only; not audited."
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
