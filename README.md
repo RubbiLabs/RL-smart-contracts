@@ -119,16 +119,59 @@ Card purchases themselves happen off-chain against the loaded card balance.
 
 ### Stellar Testnet
 
-`deployments/testnet.json` is the source of truth for these ids; the table is copied from it.
+A shared instance runs on Stellar testnet (testnet only, not audited).
+`deployments/testnet.json` is the source of truth for these ids; the table is
+copied from it.
 
-| Contract | Address | Explorer |
-|---|---|---|
-| vault | `CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR` | [View](https://stellar.expert/explorer/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) |
-| subscriptions | `CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC` | [View](https://stellar.expert/explorer/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) |
-| payroll | `CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU` | [View](https://stellar.expert/explorer/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) |
-| USDC (Circle testnet, Stellar Asset Contract) | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` | [View](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA) |
+| Contract | Address | Explorer | Network | Source | WASM | Build verification |
+|---|---|---|---|---|---|---|
+| vault | [`CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR`](https://stellar.expert/explorer/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) | [Stellar Expert](https://stellar.expert/explorer/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) · [Stellar Lab](https://lab.stellar.org/r/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) | Stellar testnet | pending first attested release | pending first attested release | pending first attested release |
+| subscriptions | [`CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC`](https://stellar.expert/explorer/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) | [Stellar Expert](https://stellar.expert/explorer/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) · [Stellar Lab](https://lab.stellar.org/r/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) | Stellar testnet | pending first attested release | pending first attested release | pending first attested release |
+| payroll | [`CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU`](https://stellar.expert/explorer/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) | [Stellar Expert](https://stellar.expert/explorer/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) · [Stellar Lab](https://lab.stellar.org/r/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) | Stellar testnet | pending first attested release | pending first attested release | pending first attested release |
 
-The activity you see on these pages is produced by `scripts/demo-testnet.sh` with dedicated demo accounts on testnet only, not by real users; see [Testnet activity](#testnet-activity). Roles, wasm hashes and the deploying commit are under [Deployment details](#deployment-details).
+USDC (Circle testnet, Stellar Asset Contract):
+[`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA).
+
+The contracts run the code deployed on 2026-10-27 from commit `2136695`
+(local `stellar contract build`). Source verification on the explorers comes
+with the first attested release, built by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) and
+installed in place with `scripts/upgrade-testnet.sh` (same ids, storage
+kept). The Source, WASM and Build verification cells will be filled in once
+the maintainers have confirmed the verified source on both explorers.
+
+Check it yourself (shown for vault, once a release `v<version>` exists; use
+`rubbi-subscriptions` / `rubbi-payroll` and their ids for the others):
+
+```sh
+# 1. The WASM the contract runs is the attested release asset
+stellar contract fetch --id CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR \
+  --network testnet --out-file vault-onchain.wasm
+gh release download v<version>_rubbi-vault_cli28.1.0 -R RubbiLabs/RL-smart-contracts
+sha256sum vault-onchain.wasm rubbi-vault_v<version>.wasm   # macOS: shasum -a 256; the hashes must match
+
+# 2. The asset was built from this repository by the pinned Stellar Expert workflow
+gh attestation verify rubbi-vault_v<version>.wasm -R RubbiLabs/RL-smart-contracts \
+  --signer-workflow stellar-expert/soroban-build-workflow/.github/workflows/release.yml
+
+# 3. The WASM names its source repository
+stellar contract info meta --wasm vault-onchain.wasm       # source_repo: github:RubbiLabs/RL-smart-contracts
+```
+
+`--signer-workflow` is needed because the attestation is signed by Stellar
+Expert's reusable workflow, not by a workflow of this repository; without it
+`gh attestation verify` fails.
+
+Release builds use `stellar contract build --optimize` with stellar-cli
+28.1.0 and add `source_repo` metadata, so a local `stellar contract build`
+will not produce the same hash. Verify against the release asset instead.
+
+[`docs/TESTNET.md`](docs/TESTNET.md) has the role addresses, the demo
+transactions, read-only calls with expected results, TypeScript bindings and
+the release-and-upgrade procedure. The activity you see on the explorer
+pages comes from `scripts/demo-testnet.sh` with dedicated demo accounts, not
+real users; see [Testnet activity](#testnet-activity). Roles, wasm hashes and
+the deploying commit are also under [Deployment details](#deployment-details).
 
 ## Conventions shared by all three contracts
 
@@ -665,12 +708,19 @@ salary schedule each time; `--day2` acts on the most recently recorded ids.
 │   ├── deploy-testnet.sh        build + deploy + deployments/testnet.json
 │   ├── smoke-testnet.sh         read-only checks of a deployment
 │   ├── demo-testnet.sh          exercise the testnet contracts with demo accounts
+│   ├── upgrade-testnet.sh       install an attested release on testnet in place
 │   └── check-readme-errors.sh   README error tables == errors.rs
 ├── deployments/
+│   ├── testnet.json             the shared testnet deployment record
 │   ├── testnet.example.json     shape of the deployment record
 │   └── testnet-demo.json        ids and tx hashes written by demo-testnet.sh
+├── docs/
+│   ├── TESTNET.md               testnet deployment, demo transactions, release and upgrade
+│   └── CONTRACT_INTERFACE.md    signers, events and errors per contract
 ├── legacy/evm/                  earlier Solidity implementation, kept for reference only
-└── .github/workflows/ci.yml     fmt, clippy, tests, wasm build, upgrade tests, shellcheck
+└── .github/workflows/
+    ├── ci.yml                   fmt, clippy, tests, wasm build, upgrade tests, shellcheck
+    └── release.yml              attested release builds on vX.Y.Z tags
 ```
 
 ## Contributing via Drips Wave
