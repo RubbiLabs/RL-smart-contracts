@@ -29,6 +29,11 @@ jobs:
 
       - name: Install stellar-cli 28.1.0
         uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
+        # The action takes the CLI version from `inputs.version`, falling back
+        # to the ref it was called with; pinned by SHA, the ref is not a
+        # version, so pass it explicitly.
+        with:
+          version: '28.1.0'
 
       - name: Versions
         run: |
