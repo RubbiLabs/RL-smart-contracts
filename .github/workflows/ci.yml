@@ -16,17 +16,19 @@ jobs:
     name: fmt, clippy, test, wasm build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      # Third-party actions are pinned to commit SHAs (the tag they resolved
+      # to is in the trailing comment); review the diff before bumping.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Installs the toolchain, target and components pinned in
       # rust-toolchain.toml and caches ~/.cargo and target/.
       - name: Install Rust (from rust-toolchain.toml)
-        uses: actions-rust-lang/setup-rust-toolchain@v2
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           rustflags: ""
 
       - name: Install stellar-cli 28.1.0
-        uses: stellar/stellar-cli@v28.1.0
+        uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
 
       - name: Versions
         run: |
@@ -59,7 +61,7 @@ jobs:
           cargo test -p rubbi-payroll --features wasm-upgrade-test
 
       - name: Upload wasm artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: contracts-wasm
           path: target/wasm32v1-none/release/*.wasm
