@@ -30,14 +30,71 @@
     "finished_at": "2026-10-28T03:26:50Z",
     "spend_reference": "1a5ce36fb1b1bd756140177c11f85ed35d55f5a9f5357d5c34550e051aafff1c",
     "refund_reference": "be28c0e7ec549bd136f25e4ce591b38742013711b605b2f323cb5c93f6ca7a1b",
-    "transactions": []
+    "transactions": [
+      {
+        "step": "vault-deposit",
+        "hash": "b06b879b89492bcef6264891508945ca359f46b47854df73b58f4cabada2659a",
+        "link": "https://stellar.expert/explorer/testnet/tx/b06b879b89492bcef6264891508945ca359f46b47854df73b58f4cabada2659a"
+      },
+      {
+        "step": "vault-withdraw",
+        "hash": "7b9c2f0aabbf6fb5129b424556b883863b592dabde97e42d13bb5cf2847b120d",
+        "link": "https://stellar.expert/explorer/testnet/tx/7b9c2f0aabbf6fb5129b424556b883863b592dabde97e42d13bb5cf2847b120d"
+      },
+      {
+        "step": "vault-settle-card-spend",
+        "hash": "2e449413432723ced5903c16105ab8315b2d6e115fd041de5a8676410d538ba2",
+        "link": "https://stellar.expert/explorer/testnet/tx/2e449413432723ced5903c16105ab8315b2d6e115fd041de5a8676410d538ba2"
+      },
+      {
+        "step": "vault-credit-refund",
+        "hash": "7de7066a8030ec778456f5853238fca87f425585d88df3429089d1de1298b336",
+        "link": "https://stellar.expert/explorer/testnet/tx/7de7066a8030ec778456f5853238fca87f425585d88df3429089d1de1298b336"
+      },
+      {
+        "step": "subscriptions-add-merchant",
+        "hash": "9edb23fe9bca8e580ad6bc076344c78f21a5c050032753d1c802bf7025945073",
+        "link": "https://stellar.expert/explorer/testnet/tx/9edb23fe9bca8e580ad6bc076344c78f21a5c050032753d1c802bf7025945073"
+      },
+      {
+        "step": "subscriptions-create-plan",
+        "hash": "31c3ba1687e0a765f6a332db27595eff09a46127580d6c613199c02daa6cc59e",
+        "link": "https://stellar.expert/explorer/testnet/tx/31c3ba1687e0a765f6a332db27595eff09a46127580d6c613199c02daa6cc59e"
+      },
+      {
+        "step": "usdc-approve",
+        "hash": "da3d69c7fb8c3e566a746549de65563b09b9ebc34ab6c74cafb6f97781b0df85",
+        "link": "https://stellar.expert/explorer/testnet/tx/da3d69c7fb8c3e566a746549de65563b09b9ebc34ab6c74cafb6f97781b0df85"
+      },
+      {
+        "step": "subscriptions-subscribe",
+        "hash": "758615ce719e222f52138c1da4f61e32bc92db3867ccc536a608f34e42221329",
+        "link": "https://stellar.expert/explorer/testnet/tx/758615ce719e222f52138c1da4f61e32bc92db3867ccc536a608f34e42221329"
+      },
+      {
+        "step": "payroll-fund",
+        "hash": "a1901714214eb3fdfa8005afb2d57769cb344f34cd76543702adc978611e8e7d",
+        "link": "https://stellar.expert/explorer/testnet/tx/a1901714214eb3fdfa8005afb2d57769cb344f34cd76543702adc978611e8e7d"
+      },
+      {
+        "step": "payroll-create-schedules",
+        "hash": "b702ac7bae65b3bf106208df396ed1d73c59c0749f0a4994764c4172e012958d",
+        "link": "https://stellar.expert/explorer/testnet/tx/b702ac7bae65b3bf106208df396ed1d73c59c0749f0a4994764c4172e012958d"
+      },
+      {
+        "step": "payroll-disburse",
+        "hash": "0561d7c1d952d3f1c5ccd3db528ff734892f2f12a2a4736a36c316e06bb0c242",
+        "link": "https://stellar.expert/explorer/testnet/tx/0561d7c1d952d3f1c5ccd3db528ff734892f2f12a2a4736a36c316e06bb0c242"
+      }
+    ],
+    "transactions_source": "recovered on 2026-10-31 from Horizon (operations of the demo and role accounts between started_at and finished_at); this run predates hash recording in demo-testnet.sh"
   },
   "runs": [
     {
       "id": "20261028T032451Z-81569",
       "mode": "day1",
       "finished_at": "2026-10-28T03:26:50Z",
-      "transactions": 0
+      "transactions": 11
     }
   ]
 }
