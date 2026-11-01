@@ -250,6 +250,7 @@ pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32
 | Function | Auth | Errors | Events |
 |---|---|---|---|
 | `add_merchant(merchant, payout)` — `payout` must already be able to receive USDC (trustline open) | admin | `MerchantExists`, `PayoutUnavailable` | `merchant_added` |
+| `set_merchant_payout(merchant, payout)` — rotate the payout address for future charges; `payout` must be able to receive USDC | `merchant` | `MerchantNotFound`, `PayoutUnavailable` | `merchant_payout_set` |
 | `set_merchant_active(merchant, active)` — inactive merchants cannot create plans or take subscribers; their subscriptions are skipped by `charge` | admin | `MerchantNotFound` | `merchant_active_set` |
 | `create_plan(merchant, name, amount, period) -> u32` | `merchant` (active) | `MerchantNotFound`, `MerchantInactive`, `NameTooLong`, `InvalidAmount`, `InvalidPeriod` | `plan_created` |
 | `set_plan_active(merchant, plan_id, active)` — deactivated plans take no new subscribers; existing ones keep running | `merchant` (plan owner) | `PlanNotFound`, `NotPlanOwner` | `plan_active_set` |

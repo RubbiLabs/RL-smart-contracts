@@ -486,6 +486,101 @@ fn set_merchant_active_toggles_and_emits() {
     );
 }
 
+#[test]
+fn set_merchant_payout_requires_exact_merchant_auth_and_rotates_future_charges() {
+    let s = setup();
+    let (merchant, old_payout, plan_id) = merchant_with_plan(&s, 10 * USDC);
+    let new_payout = Address::generate(&s.env);
+    let fee = 10 * USDC * FEE_BPS as i128 / 10_000;
+
+    let user = subscriber(&s, 1_000 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    assert_eq!(s.token.balance(&old_payout), 10 * USDC - fee);
+    assert_eq!(s.token.balance(&new_payout), 0);
+
+    // Exact merchant auth assertion and event emission.
+    s.client.set_merchant_payout(&merchant, &new_payout);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &merchant,
+            "set_merchant_payout",
+            (merchant.clone(), new_payout.clone()).into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [events::MerchantPayoutSet {
+            merchant: merchant.clone(),
+            old: old_payout.clone(),
+            new: new_payout.clone(),
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+    assert_eq!(
+        s.client.get_merchant(&merchant),
+        Some(Merchant {
+            payout: new_payout.clone(),
+            active: true,
+        })
+    );
+
+    // Rotation takes effect for the next charge (payment goes to the new address).
+    advance(&s, MONTH);
+    assert!(s.client.charge(&sub_id));
+    assert_eq!(s.token.balance(&old_payout), 10 * USDC - fee);
+    assert_eq!(s.token.balance(&new_payout), 10 * USDC - fee);
+
+    // Inactive merchant can also rotate payout.
+    s.client.set_merchant_active(&merchant, &false);
+    let third_payout = Address::generate(&s.env);
+    s.client.set_merchant_payout(&merchant, &third_payout);
+    assert_eq!(
+        s.client.get_merchant(&merchant).unwrap().payout,
+        third_payout
+    );
+
+    // Unknown merchant fails with MerchantNotFound.
+    let unknown = Address::generate(&s.env);
+    assert_eq!(
+        s.client.try_set_merchant_payout(&unknown, &new_payout),
+        Err(Ok(Error::MerchantNotFound))
+    );
+
+    // Wrong signer fails (admin or third party cannot rotate merchant payout).
+    for signer in [&s.admin, &Address::generate(&s.env)] {
+        mock_auth_for(
+            &s,
+            signer,
+            "set_merchant_payout",
+            (merchant.clone(), new_payout.clone()).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_set_merchant_payout(&merchant, &new_payout),
+            Err(Err(_))
+        ));
+    }
+}
+
+#[test]
+fn set_merchant_payout_rejects_unpayable_address() {
+    let (s, mock) = setup_with_mock_token();
+    s.env.mock_all_auths();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+    s.client.add_merchant(&merchant, &payout);
+
+    let unpayable = Address::generate(&s.env);
+    mock.set_unpayable(&unpayable);
+
+    assert_eq!(
+        s.client.try_set_merchant_payout(&merchant, &unpayable),
+        Err(Ok(Error::PayoutUnavailable))
+    );
+    assert_eq!(s.client.get_merchant(&merchant).unwrap().payout, payout);
+}
+
 // ---- plans ---------------------------------------------------------------------
 
 #[test]
@@ -1854,6 +1949,15 @@ fn every_state_change_emits_its_event() {
         events::MerchantAdded {
             merchant: merchant.clone(),
             payout: payout.clone(),
+        }
+    );
+    let new_payout = Address::generate(&s.env);
+    expect_event!(
+        s.client.set_merchant_payout(&merchant, &new_payout),
+        events::MerchantPayoutSet {
+            merchant: merchant.clone(),
+            old: payout.clone(),
+            new: new_payout.clone(),
         }
     );
     expect_event!(
