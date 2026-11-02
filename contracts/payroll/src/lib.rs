@@ -69,6 +69,8 @@ pub enum ScheduleStatus {
     Paused,
     /// Cancelled by the employer. Final.
     Cancelled,
+    /// Completed its fixed number of payments (`payments_left == 0`). Final.
+    Completed,
 }
 
 /// One schedule to create. `label` is a short description such as
@@ -81,6 +83,8 @@ pub struct ScheduleInput {
     pub amount: i128,
     pub period: u64,
     pub label: String,
+    /// Fixed number of payments to disburse before completing (0 = unlimited).
+    pub payments_left: u32,
 }
 
 /// A recurring salary payment from `employer` to `recipient`.
@@ -97,6 +101,8 @@ pub struct Schedule {
     pub status: ScheduleStatus,
     pub label: String,
     pub created_at: u64,
+    /// Payments remaining before the schedule completes (0 = unlimited).
+    pub payments_left: u32,
 }
 
 /// The payroll contract.
@@ -234,6 +240,7 @@ impl PayrollContract {
                     status: ScheduleStatus::Active,
                     label: input.label.clone(),
                     created_at: now,
+                    payments_left: input.payments_left,
                 },
             );
             ids.push_back(id);
@@ -312,6 +319,9 @@ impl PayrollContract {
         let mut schedule = owned_schedule(&env, &employer, schedule_id)?;
         if schedule.status == ScheduleStatus::Cancelled {
             return Err(Error::AlreadyCancelled);
+        }
+        if schedule.status == ScheduleStatus::Completed {
+            return Err(Error::NotActive);
         }
         storage::extend_instance(&env);
         schedule.status = ScheduleStatus::Cancelled;
@@ -646,6 +656,15 @@ fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
     // Effects: debit the escrow and advance by exactly one period (L3).
     debit_escrow(env, &schedule.employer, schedule.amount)?;
     schedule.next_due = next_due;
+
+    let mut completed = false;
+    if schedule.payments_left > 0 {
+        schedule.payments_left -= 1;
+        if schedule.payments_left == 0 {
+            schedule.status = ScheduleStatus::Completed;
+            completed = true;
+        }
+    }
     storage::set_schedule(env, &schedule);
 
     // The fee recipient is admin-controlled: a plain transfer.
@@ -654,7 +673,7 @@ fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
     }
 
     events::Disbursed {
-        employer: schedule.employer,
+        employer: schedule.employer.clone(),
         schedule_id,
         recipient: schedule.recipient,
         amount: schedule.amount,
@@ -662,6 +681,14 @@ fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
         next_due: schedule.next_due,
     }
     .publish(env);
+
+    if completed {
+        events::ScheduleCompleted {
+            employer: schedule.employer,
+            schedule_id,
+        }
+        .publish(env);
+    }
     Ok(true)
 }
 

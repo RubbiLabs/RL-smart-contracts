@@ -284,6 +284,7 @@ fn input(s: &Setup, recipient: &Address, amount: i128, period: u64, text: &str) 
         amount,
         period,
         label: label(s, text),
+        payments_left: 0,
     }
 }
 
@@ -1682,7 +1683,7 @@ fn on_chain_types_have_no_pii_fields() {
     // (The SDK sorts struct fields alphabetically in the spec.)
     assert_eq!(
         field_names(&ScheduleInput::spec_xdr()),
-        ["amount", "label", "period", "recipient"]
+        ["amount", "label", "payments_left", "period", "recipient"]
     );
     assert_eq!(
         field_names(&Schedule::spec_xdr()),
@@ -1693,6 +1694,7 @@ fn on_chain_types_have_no_pii_fields() {
             "id",
             "label",
             "next_due",
+            "payments_left",
             "period",
             "recipient",
             "status"
@@ -1785,4 +1787,136 @@ fn upgrade_by_admin_replaces_the_executable() {
     assert!(s.client.disburse(&id));
     assert_eq!(s.client.escrow_of(&boss), 90 * USDC);
     assert!(s.token.balance(&staff) > 0);
+}
+
+// -----------------------------------------------------------------------------
+// Issue #13: Fixed-term payroll schedules (payments_left)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn fixed_payment_schedule_pays_exact_count_then_completes() {
+    let s = setup();
+    let boss = employer(&s, 1_000 * USDC);
+    let staff = Address::generate(&s.env);
+    s.env.mock_all_auths();
+
+    // Create a schedule with exactly 3 payments
+    let mut sched_in = input(&s, &staff, 100 * USDC, MONTH, "Fixed 3-term");
+    sched_in.payments_left = 3;
+
+    let start = now(&s);
+    let ids = s.client.create_schedules(
+        &boss,
+        &soroban_sdk::vec![&s.env, sched_in],
+        &start,
+    );
+    let id = ids.get(0).unwrap();
+
+    let mut sched = s.client.get_schedule(&id).unwrap();
+    assert_eq!(sched.payments_left, 3);
+    assert_eq!(sched.status, ScheduleStatus::Active);
+
+    // Payment 1
+    assert!(s.client.disburse(&id));
+    sched = s.client.get_schedule(&id).unwrap();
+    assert_eq!(sched.payments_left, 2);
+    assert_eq!(sched.status, ScheduleStatus::Active);
+
+    // Payment 2
+    advance(&s, MONTH);
+    assert!(s.client.disburse(&id));
+    sched = s.client.get_schedule(&id).unwrap();
+    assert_eq!(sched.payments_left, 1);
+    assert_eq!(sched.status, ScheduleStatus::Active);
+
+    // Payment 3 (final)
+    advance(&s, MONTH);
+    assert!(s.client.disburse(&id));
+    sched = s.client.get_schedule(&id).unwrap();
+    assert_eq!(sched.payments_left, 0);
+    assert_eq!(sched.status, ScheduleStatus::Completed);
+
+    // 4th disburse returns Err(Error::NotActive)
+    advance(&s, MONTH);
+    assert_eq!(s.client.try_disburse(&id), Err(Ok(Error::NotActive)));
+
+    // A completed schedule cannot be paused, resumed, or cancelled
+    assert_eq!(
+        s.client.try_pause_schedule(&boss, &id),
+        Err(Ok(Error::NotActive))
+    );
+    assert_eq!(
+        s.client.try_resume_schedule(&boss, &id),
+        Err(Ok(Error::NotPaused))
+    );
+    assert_eq!(
+        s.client.try_cancel_schedule(&boss, &id),
+        Err(Ok(Error::NotActive))
+    );
+}
+
+#[test]
+fn failed_disbursement_does_not_decrement_payments_left() {
+    let s = setup();
+    let boss = employer(&s, 100 * USDC); // only enough for 1 payment
+    let staff = Address::generate(&s.env);
+    s.env.mock_all_auths();
+
+    let mut sched_in = input(&s, &staff, 100 * USDC, MONTH, "Fixed 2-term");
+    sched_in.payments_left = 2;
+
+    let start = now(&s);
+    let ids = s.client.create_schedules(
+        &boss,
+        &soroban_sdk::vec![&s.env, sched_in],
+        &start,
+    );
+    let id = ids.get(0).unwrap();
+
+    // 1st payment succeeds
+    assert!(s.client.disburse(&id));
+    let mut sched = s.client.get_schedule(&id).unwrap();
+    assert_eq!(sched.payments_left, 1);
+
+    // 2nd payment fails due to insufficient escrow
+    advance(&s, MONTH);
+    assert!(!s.client.disburse(&id));
+    sched = s.client.get_schedule(&id).unwrap();
+    assert_eq!(sched.payments_left, 1); // Not decremented
+    assert_eq!(sched.status, ScheduleStatus::Active);
+
+    // Fund escrow and disburse again -> now completes
+    s.client.fund(&boss, &(100 * USDC));
+    assert!(s.client.disburse(&id));
+    sched = s.client.get_schedule(&id).unwrap();
+    assert_eq!(sched.payments_left, 0);
+    assert_eq!(sched.status, ScheduleStatus::Completed);
+}
+
+#[test]
+fn zero_payments_left_runs_indefinitely() {
+    let s = setup();
+    let boss = employer(&s, 1_000 * USDC);
+    let staff = Address::generate(&s.env);
+    s.env.mock_all_auths();
+
+    // payments_left = 0 means unlimited
+    let sched_in = input(&s, &staff, 100 * USDC, MONTH, "Unlimited");
+    assert_eq!(sched_in.payments_left, 0);
+
+    let start = now(&s);
+    let ids = s.client.create_schedules(
+        &boss,
+        &soroban_sdk::vec![&s.env, sched_in],
+        &start,
+    );
+    let id = ids.get(0).unwrap();
+
+    for _ in 0..5 {
+        assert!(s.client.disburse(&id));
+        let sched = s.client.get_schedule(&id).unwrap();
+        assert_eq!(sched.payments_left, 0);
+        assert_eq!(sched.status, ScheduleStatus::Active);
+        advance(&s, MONTH);
+    }
 }

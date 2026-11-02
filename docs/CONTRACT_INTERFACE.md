@@ -150,6 +150,7 @@ fee recipient `fee`.
 | `schedule_paused` | `employer: Address` | `schedule_id: u64` |
 | `schedule_resumed` | `employer: Address` | `schedule_id: u64`, `next_due: u64` |
 | `schedule_cancelled` | `employer: Address` | `schedule_id: u64` |
+| `schedule_completed` | `employer: Address` | `schedule_id: u64` |
 | `fee_set` | — | `fee_bps: u32` |
 | `fee_recipient_set` | — | `fee_recipient: Address` |
 | `admin_proposed` | `pending_admin: Address` | — |
