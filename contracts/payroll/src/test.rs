@@ -1805,11 +1805,9 @@ fn fixed_payment_schedule_pays_exact_count_then_completes() {
     sched_in.payments_left = 3;
 
     let start = now(&s);
-    let ids = s.client.create_schedules(
-        &boss,
-        &soroban_sdk::vec![&s.env, sched_in],
-        &start,
-    );
+    let ids = s
+        .client
+        .create_schedules(&boss, &soroban_sdk::vec![&s.env, sched_in], &start);
     let id = ids.get(0).unwrap();
 
     let mut sched = s.client.get_schedule(&id).unwrap();
@@ -1866,11 +1864,9 @@ fn failed_disbursement_does_not_decrement_payments_left() {
     sched_in.payments_left = 2;
 
     let start = now(&s);
-    let ids = s.client.create_schedules(
-        &boss,
-        &soroban_sdk::vec![&s.env, sched_in],
-        &start,
-    );
+    let ids = s
+        .client
+        .create_schedules(&boss, &soroban_sdk::vec![&s.env, sched_in], &start);
     let id = ids.get(0).unwrap();
 
     // 1st payment succeeds
@@ -1905,11 +1901,9 @@ fn zero_payments_left_runs_indefinitely() {
     assert_eq!(sched_in.payments_left, 0);
 
     let start = now(&s);
-    let ids = s.client.create_schedules(
-        &boss,
-        &soroban_sdk::vec![&s.env, sched_in],
-        &start,
-    );
+    let ids = s
+        .client
+        .create_schedules(&boss, &soroban_sdk::vec![&s.env, sched_in], &start);
     let id = ids.get(0).unwrap();
 
     for _ in 0..5 {
