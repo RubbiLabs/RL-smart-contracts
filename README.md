@@ -276,9 +276,9 @@ Employer-funded escrow. `__constructor(admin, token, fee_recipient, fee_bps)`
 (`fee_bps > 1_000` fails with `FeeTooHigh`).
 
 ```rust
-pub enum ScheduleStatus { Active, Paused, Cancelled }
-pub struct ScheduleInput { pub recipient: Address, pub amount: i128, pub period: u64, pub label: String /* ≤ 64 bytes */ }
-pub struct Schedule { pub id: u64, pub employer: Address, pub recipient: Address, pub amount: i128, pub period: u64, pub next_due: u64, pub status: ScheduleStatus, pub label: String, pub created_at: u64 }
+pub enum ScheduleStatus { Active, Paused, Cancelled, Completed }
+pub struct ScheduleInput { pub recipient: Address, pub amount: i128, pub period: u64, pub label: String /* ≤ 64 bytes */, pub payments_left: u32 /* 0 = unlimited */ }
+pub struct Schedule { pub id: u64, pub employer: Address, pub recipient: Address, pub amount: i128, pub period: u64, pub next_due: u64, pub status: ScheduleStatus, pub label: String, pub created_at: u64, pub payments_left: u32 }
 ```
 
 | Function | Auth | Errors | Events |
@@ -464,7 +464,12 @@ from the allowance alone.
 - **Payroll always back-pays.** Each `disburse` pays exactly one period and
   advances `next_due` by exactly one period. N missed periods are paid by N
   calls (each time-gated), and the (N+1)th call fails with `NotDue`.
-  Pausing a schedule does not move `next_due`: owed salary stays owed.
+  For fixed-term schedules (`payments_left > 0`), missed periods are paid
+  one per call until `payments_left` reaches 0, at which point the schedule
+  status becomes `Completed` and subsequent calls return `NotActive`. Calendar
+  end dates are not used (a payment count multiplied by the period provides
+  equivalent scheduling without timezone ambiguity). Pausing a schedule does
+  not move `next_due`: owed salary stays owed.
 
 ### Batches
 

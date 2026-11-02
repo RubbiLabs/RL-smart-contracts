@@ -96,6 +96,16 @@ pub struct ScheduleResumed {
     pub next_due: u64,
 }
 
+/// `schedule_completed`: schedule `schedule_id` ran out of `payments_left`
+/// and completed its fixed term. Final.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleCompleted {
+    #[topic]
+    pub employer: Address,
+    pub schedule_id: u64,
+}
+
 /// `schedule_cancelled`: `employer` cancelled schedule `schedule_id`.
 /// Final.
 #[contractevent]
