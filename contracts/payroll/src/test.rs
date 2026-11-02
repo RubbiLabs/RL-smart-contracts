@@ -1810,6 +1810,7 @@ fn upgrade_by_admin_replaces_the_executable() {
 fn fixed_payment_schedule_pays_exact_count_then_completes() {
     let s = setup();
     let boss = employer(&s, 1_000 * USDC);
+    s.client.fund(&boss, &(1_000 * USDC));
     let staff = Address::generate(&s.env);
     s.env.mock_all_auths();
 
@@ -1869,7 +1870,8 @@ fn fixed_payment_schedule_pays_exact_count_then_completes() {
 #[test]
 fn failed_disbursement_does_not_decrement_payments_left() {
     let s = setup();
-    let boss = employer(&s, 100 * USDC); // only enough for 1 payment
+    let boss = employer(&s, 200 * USDC);
+    s.client.fund(&boss, &(100 * USDC)); // only enough for 1 payment
     let staff = Address::generate(&s.env);
     s.env.mock_all_auths();
 
@@ -1906,6 +1908,7 @@ fn failed_disbursement_does_not_decrement_payments_left() {
 fn zero_payments_left_runs_indefinitely() {
     let s = setup();
     let boss = employer(&s, 1_000 * USDC);
+    s.client.fund(&boss, &(1_000 * USDC));
     let staff = Address::generate(&s.env);
     s.env.mock_all_auths();
 
