@@ -709,6 +709,7 @@ salary schedule each time; `--day2` acts on the most recently recorded ids.
 │   ├── smoke-testnet.sh         read-only checks of a deployment
 │   ├── demo-testnet.sh          exercise the testnet contracts with demo accounts
 │   ├── upgrade-testnet.sh       install an attested release on testnet in place
+│   ├── verify-release.sh        verify released contract Wasm artifacts and checksums
 │   └── check-readme-errors.sh   README error tables == errors.rs
 ├── deployments/
 │   ├── testnet.json             the shared testnet deployment record
