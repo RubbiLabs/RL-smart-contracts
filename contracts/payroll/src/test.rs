@@ -656,6 +656,7 @@ fn create_schedules_requires_exact_employer_auth_and_stores_every_schedule() {
             status: ScheduleStatus::Active,
             label: label(&s, "Design lead"),
             created_at: START,
+            payments_left: 0,
         }
     );
     assert_eq!(
@@ -670,6 +671,7 @@ fn create_schedules_requires_exact_employer_auth_and_stores_every_schedule() {
             status: ScheduleStatus::Active,
             label: label(&s, ""),
             created_at: START,
+            payments_left: 0,
         }
     );
     assert_eq!(
@@ -1726,17 +1728,28 @@ fn on_chain_types_have_no_pii_fields() {
         status,
         label,
         created_at,
+        payments_left,
     } = s.client.get_schedule(&id);
     let _ = (
-        id, employer, recipient, amount, period, next_due, status, label, created_at,
+        id,
+        employer,
+        recipient,
+        amount,
+        period,
+        next_due,
+        status,
+        label,
+        created_at,
+        payments_left,
     );
     let ScheduleInput {
         recipient,
         amount,
         period,
         label,
+        payments_left,
     } = input(&s, &Address::generate(&s.env), USDC, MONTH, "x");
-    let _ = (recipient, amount, period, label);
+    let _ = (recipient, amount, period, label, payments_left);
 }
 
 // ---- upgrade -------------------------------------------------------------------------
@@ -1810,27 +1823,27 @@ fn fixed_payment_schedule_pays_exact_count_then_completes() {
         .create_schedules(&boss, &soroban_sdk::vec![&s.env, sched_in], &start);
     let id = ids.get(0).unwrap();
 
-    let mut sched = s.client.get_schedule(&id).unwrap();
+    let mut sched = s.client.get_schedule(&id);
     assert_eq!(sched.payments_left, 3);
     assert_eq!(sched.status, ScheduleStatus::Active);
 
     // Payment 1
     assert!(s.client.disburse(&id));
-    sched = s.client.get_schedule(&id).unwrap();
+    sched = s.client.get_schedule(&id);
     assert_eq!(sched.payments_left, 2);
     assert_eq!(sched.status, ScheduleStatus::Active);
 
     // Payment 2
     advance(&s, MONTH);
     assert!(s.client.disburse(&id));
-    sched = s.client.get_schedule(&id).unwrap();
+    sched = s.client.get_schedule(&id);
     assert_eq!(sched.payments_left, 1);
     assert_eq!(sched.status, ScheduleStatus::Active);
 
     // Payment 3 (final)
     advance(&s, MONTH);
     assert!(s.client.disburse(&id));
-    sched = s.client.get_schedule(&id).unwrap();
+    sched = s.client.get_schedule(&id);
     assert_eq!(sched.payments_left, 0);
     assert_eq!(sched.status, ScheduleStatus::Completed);
 
@@ -1871,20 +1884,20 @@ fn failed_disbursement_does_not_decrement_payments_left() {
 
     // 1st payment succeeds
     assert!(s.client.disburse(&id));
-    let mut sched = s.client.get_schedule(&id).unwrap();
+    let mut sched = s.client.get_schedule(&id);
     assert_eq!(sched.payments_left, 1);
 
     // 2nd payment fails due to insufficient escrow
     advance(&s, MONTH);
     assert!(!s.client.disburse(&id));
-    sched = s.client.get_schedule(&id).unwrap();
+    sched = s.client.get_schedule(&id);
     assert_eq!(sched.payments_left, 1); // Not decremented
     assert_eq!(sched.status, ScheduleStatus::Active);
 
     // Fund escrow and disburse again -> now completes
     s.client.fund(&boss, &(100 * USDC));
     assert!(s.client.disburse(&id));
-    sched = s.client.get_schedule(&id).unwrap();
+    sched = s.client.get_schedule(&id);
     assert_eq!(sched.payments_left, 0);
     assert_eq!(sched.status, ScheduleStatus::Completed);
 }
@@ -1908,7 +1921,7 @@ fn zero_payments_left_runs_indefinitely() {
 
     for _ in 0..5 {
         assert!(s.client.disburse(&id));
-        let sched = s.client.get_schedule(&id).unwrap();
+        let sched = s.client.get_schedule(&id);
         assert_eq!(sched.payments_left, 0);
         assert_eq!(sched.status, ScheduleStatus::Active);
         advance(&s, MONTH);
