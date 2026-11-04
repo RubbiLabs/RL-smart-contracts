@@ -31,18 +31,22 @@ git clone https://github.com/RubbiLabs/RL-smart-contracts.git
 cd RL-smart-contracts
 ```
 
-Run every check before you push; CI runs the same list:
+Run every check before you push; CI runs the same list via `just`:
 
 ```sh
-scripts/check-readme-errors.sh                      # README error tables == errors.rs
-shellcheck scripts/*.sh
-cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test --workspace
-stellar contract build                              # wasm32v1-none, release profile
-cargo test -p rubbi-vault --features wasm-upgrade-test
-cargo test -p rubbi-subscriptions --features wasm-upgrade-test
-cargo test -p rubbi-payroll --features wasm-upgrade-test
+just check
+```
+
+Or run the individual recipes / raw commands:
+
+```sh
+just drift                                          # scripts/check-readme-errors.sh
+just lint-scripts                                   # shellcheck scripts/*.sh
+just fmt-check                                      # cargo fmt --all --check
+just clippy                                         # cargo clippy --all-targets -- -D warnings
+just test                                           # cargo test --workspace
+just build                                          # stellar contract build
+just test-upgrade                                   # wasm upgrade tests
 ```
 
 If you change an error enum, run `scripts/check-readme-errors.sh --write` to
