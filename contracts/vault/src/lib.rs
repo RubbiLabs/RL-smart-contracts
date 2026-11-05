@@ -28,6 +28,9 @@ pub use errors::Error;
 
 /// The vault contract.
 #[contract]
+/// Timelock delay required between proposing and executing a contract upgrade (48 hours = 172,800 s).
+pub const UPGRADE_DELAY: u64 = 48 * 60 * 60;
+
 pub struct VaultContract;
 
 #[contractimpl]
@@ -280,21 +283,65 @@ impl VaultContract {
         events::Unpaused {}.publish(&env);
     }
 
-    /// Replace the contract code with the already-uploaded wasm identified
-    /// by `new_wasm_hash`. Storage is kept; the new code takes effect after
-    /// this invocation completes.
+    /// Propose upgrading the contract executable to `new_wasm_hash` with a 48-hour timelock delay.
     ///
-    /// Auth: admin. Errors: none (the host fails if the wasm is not
-    /// uploaded). Events: `upgraded`.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+    /// Auth: admin. Errors: none. Events: `upgrade_proposed`.
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         storage::get_admin(&env).require_auth();
         storage::extend_instance(&env);
-        env.deployer()
-            .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
-        events::Upgraded {
+        let executable_at = env.ledger().timestamp().saturating_add(UPGRADE_DELAY);
+        let pending = storage::PendingUpgrade {
+            wasm_hash: new_wasm_hash.clone(),
+            executable_at,
+        };
+        storage::set_pending_upgrade(&env, &pending);
+        events::UpgradeProposed {
             wasm_hash: new_wasm_hash,
+            executable_at,
         }
         .publish(&env);
+    }
+
+    /// Execute a pending contract upgrade after the 48-hour timelock delay has elapsed.
+    ///
+    /// Auth: admin.
+    /// Errors: `NoPendingUpgrade` if no upgrade is pending,
+    /// `UpgradeNotReady` if invoked before `executable_at`.
+    /// Events: `upgraded`.
+    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+
+        let pending = storage::get_pending_upgrade(&env).ok_or(Error::NoPendingUpgrade)?;
+        let now = env.ledger().timestamp();
+        if now < pending.executable_at {
+            return Err(Error::UpgradeNotReady);
+        }
+
+        env.deployer()
+            .update_current_contract(ContractExecutable::Wasm(pending.wasm_hash.clone()));
+        storage::clear_pending_upgrade(&env);
+
+        events::Upgraded {
+            wasm_hash: pending.wasm_hash,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancel a pending contract upgrade.
+    ///
+    /// Auth: admin. Errors: none. Events: `upgrade_cancelled`.
+    pub fn cancel_upgrade(env: Env) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        storage::clear_pending_upgrade(&env);
+        events::UpgradeCancelled {}.publish(&env);
+    }
+
+    /// Proposed contract upgrade awaiting `execute_upgrade`, if any. Auth: none.
+    pub fn pending_upgrade(env: Env) -> Option<storage::PendingUpgrade> {
+        storage::get_pending_upgrade(&env)
     }
 
     // ---- reads -------------------------------------------------------------

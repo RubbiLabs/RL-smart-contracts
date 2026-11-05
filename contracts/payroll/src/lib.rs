@@ -69,6 +69,8 @@ pub enum ScheduleStatus {
     Paused,
     /// Cancelled by the employer. Final.
     Cancelled,
+    /// Completed its fixed number of payments (`payments_left == 0`). Final.
+    Completed,
 }
 
 /// One schedule to create. `label` is a short description such as
@@ -76,11 +78,16 @@ pub enum ScheduleStatus {
 /// address is stored.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Timelock delay required between proposing and executing a contract upgrade (48 hours = 172,800 s).
+pub const UPGRADE_DELAY: u64 = 48 * 60 * 60;
+
 pub struct ScheduleInput {
     pub recipient: Address,
     pub amount: i128,
     pub period: u64,
     pub label: String,
+    /// Fixed number of payments to disburse before completing (0 = unlimited).
+    pub payments_left: u32,
 }
 
 /// A recurring salary payment from `employer` to `recipient`.
@@ -97,6 +104,8 @@ pub struct Schedule {
     pub status: ScheduleStatus,
     pub label: String,
     pub created_at: u64,
+    /// Payments remaining before the schedule completes (0 = unlimited).
+    pub payments_left: u32,
 }
 
 /// The payroll contract.
@@ -234,6 +243,7 @@ impl PayrollContract {
                     status: ScheduleStatus::Active,
                     label: input.label.clone(),
                     created_at: now,
+                    payments_left: input.payments_left,
                 },
             );
             ids.push_back(id);
@@ -312,6 +322,9 @@ impl PayrollContract {
         let mut schedule = owned_schedule(&env, &employer, schedule_id)?;
         if schedule.status == ScheduleStatus::Cancelled {
             return Err(Error::AlreadyCancelled);
+        }
+        if schedule.status == ScheduleStatus::Completed {
+            return Err(Error::NotActive);
         }
         storage::extend_instance(&env);
         schedule.status = ScheduleStatus::Cancelled;
@@ -468,21 +481,65 @@ impl PayrollContract {
         events::Unpaused {}.publish(&env);
     }
 
-    /// Replace the contract code with the already-uploaded wasm identified
-    /// by `new_wasm_hash`. Storage is kept; the new code takes effect after
-    /// this invocation completes.
+    /// Propose upgrading the contract executable to `new_wasm_hash` with a 48-hour timelock delay.
     ///
-    /// Auth: admin. Errors: none (the host fails if the wasm is not
-    /// uploaded). Events: `upgraded`.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+    /// Auth: admin. Errors: none. Events: `upgrade_proposed`.
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         storage::get_admin(&env).require_auth();
         storage::extend_instance(&env);
-        env.deployer()
-            .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
-        events::Upgraded {
+        let executable_at = env.ledger().timestamp().saturating_add(UPGRADE_DELAY);
+        let pending = storage::PendingUpgrade {
+            wasm_hash: new_wasm_hash.clone(),
+            executable_at,
+        };
+        storage::set_pending_upgrade(&env, &pending);
+        events::UpgradeProposed {
             wasm_hash: new_wasm_hash,
+            executable_at,
         }
         .publish(&env);
+    }
+
+    /// Execute a pending contract upgrade after the 48-hour timelock delay has elapsed.
+    ///
+    /// Auth: admin.
+    /// Errors: `NoPendingUpgrade` if no upgrade is pending,
+    /// `UpgradeNotReady` if invoked before `executable_at`.
+    /// Events: `upgraded`.
+    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+
+        let pending = storage::get_pending_upgrade(&env).ok_or(Error::NoPendingUpgrade)?;
+        let now = env.ledger().timestamp();
+        if now < pending.executable_at {
+            return Err(Error::UpgradeNotReady);
+        }
+
+        env.deployer()
+            .update_current_contract(ContractExecutable::Wasm(pending.wasm_hash.clone()));
+        storage::clear_pending_upgrade(&env);
+
+        events::Upgraded {
+            wasm_hash: pending.wasm_hash,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancel a pending contract upgrade.
+    ///
+    /// Auth: admin. Errors: none. Events: `upgrade_cancelled`.
+    pub fn cancel_upgrade(env: Env) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        storage::clear_pending_upgrade(&env);
+        events::UpgradeCancelled {}.publish(&env);
+    }
+
+    /// Proposed contract upgrade awaiting `execute_upgrade`, if any. Auth: none.
+    pub fn pending_upgrade(env: Env) -> Option<storage::PendingUpgrade> {
+        storage::get_pending_upgrade(&env)
     }
 
     // ---- reads -------------------------------------------------------------
@@ -646,6 +703,15 @@ fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
     // Effects: debit the escrow and advance by exactly one period (L3).
     debit_escrow(env, &schedule.employer, schedule.amount)?;
     schedule.next_due = next_due;
+
+    let mut completed = false;
+    if schedule.payments_left > 0 {
+        schedule.payments_left -= 1;
+        if schedule.payments_left == 0 {
+            schedule.status = ScheduleStatus::Completed;
+            completed = true;
+        }
+    }
     storage::set_schedule(env, &schedule);
 
     // The fee recipient is admin-controlled: a plain transfer.
@@ -654,7 +720,7 @@ fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
     }
 
     events::Disbursed {
-        employer: schedule.employer,
+        employer: schedule.employer.clone(),
         schedule_id,
         recipient: schedule.recipient,
         amount: schedule.amount,
@@ -662,6 +728,14 @@ fn disburse_one(env: &Env, schedule_id: u64) -> Result<bool, Error> {
         next_due: schedule.next_due,
     }
     .publish(env);
+
+    if completed {
+        events::ScheduleCompleted {
+            employer: schedule.employer,
+            schedule_id,
+        }
+        .publish(env);
+    }
     Ok(true)
 }
 

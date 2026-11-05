@@ -87,7 +87,20 @@ pub struct Paused {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Unpaused {}
 
-/// `upgraded`: the contract executable will be replaced by `wasm_hash`.
+/// `upgrade_proposed`: the admin proposed upgrading the contract to `wasm_hash` at `executable_at`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposed {
+    pub wasm_hash: BytesN<32>,
+    pub executable_at: u64,
+}
+
+/// `upgrade_cancelled`: the admin cancelled the pending upgrade proposal.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeCancelled {}
+
+/// `upgraded`: the contract executable was replaced by `wasm_hash`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Upgraded {

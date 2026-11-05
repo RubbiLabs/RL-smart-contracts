@@ -712,8 +712,14 @@ fn admin_only_functions_reject_other_signers() {
             (stranger.clone(),).into_val(&s.env),
         );
         assert!(is_host_error(&s.client.try_propose_admin(&stranger)));
-        mock_auth_for(&s, signer, "upgrade", (fake_hash.clone(),).into_val(&s.env));
-        assert!(is_host_error(&s.client.try_upgrade(&fake_hash)));
+        mock_auth_for(&s, signer, "propose_upgrade", (fake_hash.clone(),).into_val(&s.env));
+        assert!(is_host_error(&s.client.try_propose_upgrade(&fake_hash)));
+
+        mock_auth_for(&s, signer, "execute_upgrade", ().into_val(&s.env));
+        assert!(is_host_error(&s.client.try_execute_upgrade()));
+
+        mock_auth_for(&s, signer, "cancel_upgrade", ().into_val(&s.env));
+        assert!(is_host_error(&s.client.try_cancel_upgrade()));
     }
 
     s.env.mock_all_auths();
@@ -722,6 +728,32 @@ fn admin_only_functions_reject_other_signers() {
     assert_eq!(s.client.fee_recipient(), s.fee_recipient);
     assert_eq!(s.client.pending_admin(), None);
     assert_eq!(s.client.admin(), s.admin);
+}
+
+#[test]
+fn upgrade_timelock_lifecycle() {
+    let s = setup();
+    s.env.mock_all_auths();
+    let fake_hash = BytesN::from_array(&s.env, &[0xAB; 32]);
+
+    // 1. execute_upgrade without proposal fails with NoPendingUpgrade
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::NoPendingUpgrade)));
+
+    // 2. Propose upgrade
+    let now = s.env.ledger().timestamp();
+    s.client.propose_upgrade(&fake_hash);
+    let pending = s.client.pending_upgrade().expect("pending upgrade set");
+    assert_eq!(pending.wasm_hash, fake_hash);
+    assert_eq!(pending.executable_at, now + UPGRADE_DELAY);
+
+    // 3. execute before timelock delay fails with UpgradeNotReady
+    s.env.ledger().with_mut(|li| li.timestamp += UPGRADE_DELAY - 1);
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::UpgradeNotReady)));
+
+    // 4. Cancel upgrade clears proposal and emits UpgradeCancelled
+    s.client.cancel_upgrade();
+    assert_eq!(s.client.pending_upgrade(), None);
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::NoPendingUpgrade)));
 }
 
 // ---- subscribe -----------------------------------------------------------------
@@ -2102,25 +2134,60 @@ fn upgrade_by_admin_replaces_the_executable() {
         .deployer()
         .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&s.env, WASM));
 
+    let now = s.env.ledger().timestamp();
     mock_auth_for(
         &s,
         &s.admin,
-        "upgrade",
+        "propose_upgrade",
         (wasm_hash.clone(),).into_val(&s.env),
     );
-    s.client.upgrade(&wasm_hash);
+    s.client.propose_upgrade(&wasm_hash);
     assert_eq!(
         s.env.auths(),
         expected_auth(
             &s,
             &s.admin,
-            "upgrade",
+            "propose_upgrade",
             (wasm_hash.clone(),).into_val(&s.env)
         )
     );
     assert_eq!(
         last_events(&s),
-        [events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.contract)]
+        [events::UpgradeProposed {
+            wasm_hash: wasm_hash.clone(),
+            executable_at: now + UPGRADE_DELAY,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+
+    // Before delay expires: fails
+    mock_auth_for(&s, &s.admin, "execute_upgrade", ().into_val(&s.env));
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::UpgradeNotReady)));
+
+    // Advance time past 48-hour delay
+    s.env.ledger().with_mut(|li| li.timestamp += UPGRADE_DELAY);
+
+    mock_auth_for(&s, &s.admin, "execute_upgrade", ().into_val(&s.env));
+    s.client.execute_upgrade().unwrap();
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "execute_upgrade",
+            ().into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [
+            events::UpgradeProposed {
+                wasm_hash: wasm_hash.clone(),
+                executable_at: now + UPGRADE_DELAY,
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.contract)
+        ]
     );
 
     // Storage survived and the (now wasm) contract still works.

@@ -1,3 +1,10 @@
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub executable_at: u64,
+}
+
 //! Storage keys, TTL policy and typed accessors.
 //!
 //! Tiers:
@@ -37,6 +44,8 @@ pub enum DataKey {
     Admin,
     /// Proposed admin awaiting `accept_admin` (instance).
     PendingAdmin,
+    /// Proposed contract upgrade awaiting `execute_upgrade` (instance).
+    PendingUpgrade,
     /// USDC Stellar Asset Contract address (instance).
     Token,
     /// Address that receives the fee share of every disbursement (instance).
@@ -113,6 +122,20 @@ pub fn set_pending_admin(env: &Env, pending: &Address) {
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
 }
+
+pub fn get_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
+    env.storage().instance().get(&DataKey::PendingUpgrade)
+}
+
+pub fn set_pending_upgrade(env: &Env, upgrade: &PendingUpgrade) {
+    env.storage().instance().set(&DataKey::PendingUpgrade, upgrade);
+}
+
+pub fn clear_pending_upgrade(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingUpgrade);
+}
+
+
 
 pub fn get_token(env: &Env) -> Address {
     env.storage()
