@@ -27,4 +27,8 @@ pub enum Error {
     NoPendingAdmin = 5,
     /// An arithmetic operation would overflow.
     Overflow = 6,
+    /// `execute_upgrade` was called while no contract upgrade is pending.
+    NoPendingUpgrade = 7,
+    /// `execute_upgrade` was called before the 48-hour timelock delay elapsed.
+    UpgradeNotReady = 8,
 }

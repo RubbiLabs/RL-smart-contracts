@@ -67,4 +67,8 @@ pub enum Error {
     /// The merchant's payout address cannot receive USDC: it has no USDC
     /// trustline, or the trustline is frozen.
     PayoutUnavailable = 24,
+    /// `execute_upgrade` was called while no contract upgrade is pending.
+    NoPendingUpgrade = 25,
+    /// `execute_upgrade` was called before the 48-hour timelock delay elapsed.
+    UpgradeNotReady = 26,
 }
