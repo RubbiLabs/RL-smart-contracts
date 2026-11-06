@@ -55,9 +55,20 @@ pub const MAX_NAME_LEN: u32 = 64;
 /// An allowlisted merchant (biller). Charges are paid to `payout`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Timelock delay required between proposing and executing a contract upgrade (48 hours = 172,800 s).
+pub const UPGRADE_DELAY: u64 = 48 * 60 * 60;
+
 pub struct Merchant {
     pub payout: Address,
     pub active: bool,
+}
+
+/// A pending merchant application submitted via `apply_merchant`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantApplication {
+    pub payout: Address,
+    pub applied_at: u64,
 }
 
 /// A subscription plan offered by a merchant. `amount` is in the token's
@@ -162,6 +173,89 @@ impl SubscriptionsContract {
         );
         events::MerchantAdded { merchant, payout }.publish(&env);
         Ok(())
+    }
+
+    /// Apply for merchant onboarding with payout address `payout`.
+    ///
+    /// Auth: `merchant`. Errors: `MerchantExists`, `PayoutUnavailable`.
+    /// Events: `merchant_applied`.
+    pub fn apply_merchant(env: Env, merchant: Address, payout: Address) -> Result<(), Error> {
+        merchant.require_auth();
+        if storage::get_merchant(&env, &merchant).is_some() {
+            return Err(Error::MerchantExists);
+        }
+        if !payout_available(&env, &payout) {
+            return Err(Error::PayoutUnavailable);
+        }
+        storage::extend_instance(&env);
+        let applied_at = env.ledger().timestamp();
+        let app = MerchantApplication {
+            payout: payout.clone(),
+            applied_at,
+        };
+        storage::set_merchant_application(&env, &merchant, &app);
+        events::MerchantApplied {
+            merchant,
+            payout,
+            applied_at,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Approve a pending merchant application, allowlisting `merchant`.
+    ///
+    /// Auth: admin. Errors: `ApplicationNotFound`, `MerchantExists`, `PayoutUnavailable`.
+    /// Events: `merchant_added`, `merchant_approved`.
+    pub fn approve_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        storage::get_admin(&env).require_auth();
+        let app = storage::get_merchant_application(&env, &merchant).ok_or(Error::ApplicationNotFound)?;
+        if storage::get_merchant(&env, &merchant).is_some() {
+            return Err(Error::MerchantExists);
+        }
+        if !payout_available(&env, &app.payout) {
+            return Err(Error::PayoutUnavailable);
+        }
+        storage::extend_instance(&env);
+        storage::set_merchant(
+            &env,
+            &merchant,
+            &Merchant {
+                payout: app.payout.clone(),
+                active: true,
+            },
+        );
+        storage::clear_merchant_application(&env, &merchant);
+        events::MerchantAdded {
+            merchant: merchant.clone(),
+            payout: app.payout.clone(),
+        }
+        .publish(&env);
+        events::MerchantApproved {
+            merchant,
+            payout: app.payout,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Reject and clear a pending merchant application.
+    ///
+    /// Auth: admin. Errors: `ApplicationNotFound`. Events: `merchant_rejected`.
+    pub fn reject_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        storage::get_admin(&env).require_auth();
+        if storage::get_merchant_application(&env, &merchant).is_none() {
+            return Err(Error::ApplicationNotFound);
+        }
+        storage::extend_instance(&env);
+        storage::clear_merchant_application(&env, &merchant);
+        events::MerchantRejected { merchant }.publish(&env);
+        Ok(())
+    }
+
+    /// Read a pending merchant application, if one exists.
+    pub fn get_merchant_application(env: Env, merchant: Address) -> Option<MerchantApplication> {
+        storage::get_merchant_application(&env, &merchant)
     }
 
     /// Activate or deactivate `merchant`. An inactive merchant cannot create
@@ -556,21 +650,65 @@ impl SubscriptionsContract {
         events::Unpaused {}.publish(&env);
     }
 
-    /// Replace the contract code with the already-uploaded wasm identified
-    /// by `new_wasm_hash`. Storage is kept; the new code takes effect after
-    /// this invocation completes.
+    /// Propose upgrading the contract executable to `new_wasm_hash` with a 48-hour timelock delay.
     ///
-    /// Auth: admin. Errors: none (the host fails if the wasm is not
-    /// uploaded). Events: `upgraded`.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+    /// Auth: admin. Errors: none. Events: `upgrade_proposed`.
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         storage::get_admin(&env).require_auth();
         storage::extend_instance(&env);
-        env.deployer()
-            .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
-        events::Upgraded {
+        let executable_at = env.ledger().timestamp().saturating_add(UPGRADE_DELAY);
+        let pending = storage::PendingUpgrade {
+            wasm_hash: new_wasm_hash.clone(),
+            executable_at,
+        };
+        storage::set_pending_upgrade(&env, &pending);
+        events::UpgradeProposed {
             wasm_hash: new_wasm_hash,
+            executable_at,
         }
         .publish(&env);
+    }
+
+    /// Execute a pending contract upgrade after the 48-hour timelock delay has elapsed.
+    ///
+    /// Auth: admin.
+    /// Errors: `NoPendingUpgrade` if no upgrade is pending,
+    /// `UpgradeNotReady` if invoked before `executable_at`.
+    /// Events: `upgraded`.
+    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+
+        let pending = storage::get_pending_upgrade(&env).ok_or(Error::NoPendingUpgrade)?;
+        let now = env.ledger().timestamp();
+        if now < pending.executable_at {
+            return Err(Error::UpgradeNotReady);
+        }
+
+        env.deployer()
+            .update_current_contract(ContractExecutable::Wasm(pending.wasm_hash.clone()));
+        storage::clear_pending_upgrade(&env);
+
+        events::Upgraded {
+            wasm_hash: pending.wasm_hash,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancel a pending contract upgrade.
+    ///
+    /// Auth: admin. Errors: none. Events: `upgrade_cancelled`.
+    pub fn cancel_upgrade(env: Env) {
+        storage::get_admin(&env).require_auth();
+        storage::extend_instance(&env);
+        storage::clear_pending_upgrade(&env);
+        events::UpgradeCancelled {}.publish(&env);
+    }
+
+    /// Proposed contract upgrade awaiting `execute_upgrade`, if any. Auth: none.
+    pub fn pending_upgrade(env: Env) -> Option<storage::PendingUpgrade> {
+        storage::get_pending_upgrade(&env)
     }
 
     // ---- reads -------------------------------------------------------------
