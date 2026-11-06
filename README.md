@@ -119,59 +119,16 @@ Card purchases themselves happen off-chain against the loaded card balance.
 
 ### Stellar Testnet
 
-A shared instance runs on Stellar testnet (testnet only, not audited).
-`deployments/testnet.json` is the source of truth for these ids; the table is
-copied from it.
+`deployments/testnet.json` is the source of truth for these ids; the table is copied from it.
 
-| Contract | Address | Explorer | Network | Source | WASM | Build verification |
-|---|---|---|---|---|---|---|
-| vault | [`CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR`](https://stellar.expert/explorer/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) | [Stellar Expert](https://stellar.expert/explorer/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) · [Stellar Lab](https://lab.stellar.org/r/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) | Stellar testnet | pending first attested release | pending first attested release | pending first attested release |
-| subscriptions | [`CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC`](https://stellar.expert/explorer/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) | [Stellar Expert](https://stellar.expert/explorer/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) · [Stellar Lab](https://lab.stellar.org/r/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) | Stellar testnet | pending first attested release | pending first attested release | pending first attested release |
-| payroll | [`CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU`](https://stellar.expert/explorer/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) | [Stellar Expert](https://stellar.expert/explorer/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) · [Stellar Lab](https://lab.stellar.org/r/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) | Stellar testnet | pending first attested release | pending first attested release | pending first attested release |
+| Contract | Address | Explorer |
+|---|---|---|
+| vault | `CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR` | [View](https://stellar.expert/explorer/testnet/contract/CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR) |
+| subscriptions | `CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC` | [View](https://stellar.expert/explorer/testnet/contract/CDWMLKAUMXHLSBOKKCK5A4ECUP2VIIHXAL7MVQ5TEFLE3QUXZRMDC3PC) |
+| payroll | `CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU` | [View](https://stellar.expert/explorer/testnet/contract/CB76PQ2MTILAQJAHLMTRHYDODX7H73YUCTVVKYO46ME3MK6WUTELDGYU) |
+| USDC (Circle testnet, Stellar Asset Contract) | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` | [View](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA) |
 
-USDC (Circle testnet, Stellar Asset Contract):
-[`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA).
-
-The contracts run the code deployed on 2026-10-27 from commit `2136695`
-(local `stellar contract build`). Source verification on the explorers comes
-with the first attested release, built by
-[`.github/workflows/release.yml`](.github/workflows/release.yml) and
-installed in place with `scripts/upgrade-testnet.sh` (same ids, storage
-kept). The Source, WASM and Build verification cells will be filled in once
-the maintainers have confirmed the verified source on both explorers.
-
-Check it yourself (shown for vault, once a release `v<version>` exists; use
-`rubbi-subscriptions` / `rubbi-payroll` and their ids for the others):
-
-```sh
-# 1. The WASM the contract runs is the attested release asset
-stellar contract fetch --id CBGARSQ7BY4345DNX76LWT4VXEHRRFJMNW46SCX7DRHBILL5V6RJN6KR \
-  --network testnet --out-file vault-onchain.wasm
-gh release download v<version>_rubbi-vault_cli28.1.0 -R RubbiLabs/RL-smart-contracts
-sha256sum vault-onchain.wasm rubbi-vault_v<version>.wasm   # macOS: shasum -a 256; the hashes must match
-
-# 2. The asset was built from this repository by the pinned Stellar Expert workflow
-gh attestation verify rubbi-vault_v<version>.wasm -R RubbiLabs/RL-smart-contracts \
-  --signer-workflow stellar-expert/soroban-build-workflow/.github/workflows/release.yml
-
-# 3. The WASM names its source repository
-stellar contract info meta --wasm vault-onchain.wasm       # source_repo: github:RubbiLabs/RL-smart-contracts
-```
-
-`--signer-workflow` is needed because the attestation is signed by Stellar
-Expert's reusable workflow, not by a workflow of this repository; without it
-`gh attestation verify` fails.
-
-Release builds use `stellar contract build --optimize` with stellar-cli
-28.1.0 and add `source_repo` metadata, so a local `stellar contract build`
-will not produce the same hash. Verify against the release asset instead.
-
-[`docs/TESTNET.md`](docs/TESTNET.md) has the role addresses, the demo
-transactions, read-only calls with expected results, TypeScript bindings and
-the release-and-upgrade procedure. The activity you see on the explorer
-pages comes from `scripts/demo-testnet.sh` with dedicated demo accounts, not
-real users; see [Testnet activity](#testnet-activity). Roles, wasm hashes and
-the deploying commit are also under [Deployment details](#deployment-details).
+The activity you see on these pages is produced by `scripts/demo-testnet.sh` with dedicated demo accounts on testnet only, not by real users; see [Testnet activity](#testnet-activity). Roles, wasm hashes and the deploying commit are under [Deployment details](#deployment-details).
 
 ## Conventions shared by all three contracts
 
@@ -189,7 +146,7 @@ the deploying commit are also under [Deployment details](#deployment-details).
 - Initialization happens in `__constructor`, so a contract is configured in
   the same transaction that creates it and cannot be front-run.
 - Admin model: `propose_admin` / `accept_admin` (two-step transfer),
-  `pause` / `unpause`, `upgrade(new_wasm_hash)` (admin-only, storage kept).
+  `pause` / `unpause`, `propose_upgrade(new_wasm_hash)` / `execute_upgrade()` / `cancel_upgrade()` (48-hour timelock, storage kept).
 - Pause blocks new money coming in and automated charges going out. It never
   blocks a user from withdrawing their own funds or cancelling.
 - Storage: configuration in instance storage, per-user and per-entity data in
@@ -225,7 +182,8 @@ back (`credit_refund`, treasury). `__constructor(admin, operator, treasury, toke
 | `propose_admin(new_admin)` | admin | — | `admin_proposed` |
 | `accept_admin()` | pending admin | `NoPendingAdmin` | `admin_transferred` |
 | `pause()` / `unpause()` | admin | — | `paused` / `unpaused` |
-| `upgrade(new_wasm_hash)` | admin | — (host fails if the wasm is not uploaded) | `upgraded` |
+| `propose_upgrade(new_wasm_hash)` / `execute_upgrade()` / `cancel_upgrade()` | admin | `NoPendingUpgrade`, `UpgradeNotReady` | `upgrade_proposed` / `upgraded` / `upgrade_cancelled` |
+| `pending_upgrade() -> Option<PendingUpgrade>` | none | — | — |
 | `balance(user)`, `total_balances()`, `admin()`, `pending_admin()`, `operator()`, `treasury()`, `token()`, `is_paused()` | none | — | — |
 
 Invariant: `sum(balance(*)) == total_balances() == vault's USDC balance` as
@@ -249,6 +207,10 @@ pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32
 
 | Function | Auth | Errors | Events |
 |---|---|---|---|
+| `apply_merchant(merchant, payout)` — self-onboarding application; `payout` must be able to receive USDC | `merchant` | `MerchantExists`, `PayoutUnavailable` | `merchant_applied` |
+| `approve_merchant(merchant)` — approves pending application, moving merchant to active allowlist | admin | `ApplicationNotFound`, `MerchantExists`, `PayoutUnavailable` | `merchant_added`, `merchant_approved` |
+| `reject_merchant(merchant)` — rejects and clears pending application | admin | `ApplicationNotFound` | `merchant_rejected` |
+| `get_merchant_application(merchant) -> Option<MerchantApplication>` | none | — | — |
 | `add_merchant(merchant, payout)` — `payout` must already be able to receive USDC (trustline open) | admin | `MerchantExists`, `PayoutUnavailable` | `merchant_added` |
 | `set_merchant_active(merchant, active)` — inactive merchants cannot create plans or take subscribers; their subscriptions are skipped by `charge` | admin | `MerchantNotFound` | `merchant_active_set` |
 | `create_plan(merchant, name, amount, period) -> u32` | `merchant` (active) | `MerchantNotFound`, `MerchantInactive`, `NameTooLong`, `InvalidAmount`, `InvalidPeriod` | `plan_created` |
@@ -263,7 +225,8 @@ pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32
 | `set_fee_recipient(fee_recipient)` | admin | — | `fee_recipient_set` |
 | `propose_admin(new_admin)` / `accept_admin()` | admin / pending admin | — / `NoPendingAdmin` | `admin_proposed` / `admin_transferred` |
 | `pause()` / `unpause()` — pause blocks `subscribe`, `charge`, `charge_batch` | admin | — | `paused` / `unpaused` |
-| `upgrade(new_wasm_hash)` | admin | — | `upgraded` |
+| `propose_upgrade(new_wasm_hash)` / `execute_upgrade()` / `cancel_upgrade()` | admin | `NoPendingUpgrade`, `UpgradeNotReady` | `upgrade_proposed` / `upgraded` / `upgrade_cancelled` |
+| `pending_upgrade() -> Option<PendingUpgrade>` | none | — | — |
 | `get_merchant(merchant) -> Option<Merchant>`, `get_plan(plan_id)`, `get_subscription(sub_id)`, `sub_id_of(subscriber, plan_id) -> Option<u64>`, `admin()`, `pending_admin()`, `token()`, `fee_recipient()`, `fee_bps()`, `is_paused()` | none | `PlanNotFound` / `SubscriptionNotFound` for the two `get_*` by id | — |
 
 State machine: pause from `Active` or `PastDue`; resume only from `Paused`;
@@ -276,9 +239,9 @@ Employer-funded escrow. `__constructor(admin, token, fee_recipient, fee_bps)`
 (`fee_bps > 1_000` fails with `FeeTooHigh`).
 
 ```rust
-pub enum ScheduleStatus { Active, Paused, Cancelled }
-pub struct ScheduleInput { pub recipient: Address, pub amount: i128, pub period: u64, pub label: String /* ≤ 64 bytes */ }
-pub struct Schedule { pub id: u64, pub employer: Address, pub recipient: Address, pub amount: i128, pub period: u64, pub next_due: u64, pub status: ScheduleStatus, pub label: String, pub created_at: u64 }
+pub enum ScheduleStatus { Active, Paused, Cancelled, Completed }
+pub struct ScheduleInput { pub recipient: Address, pub amount: i128, pub period: u64, pub label: String /* ≤ 64 bytes */, pub payments_left: u32 /* 0 = unlimited */ }
+pub struct Schedule { pub id: u64, pub employer: Address, pub recipient: Address, pub amount: i128, pub period: u64, pub next_due: u64, pub status: ScheduleStatus, pub label: String, pub created_at: u64, pub payments_left: u32 }
 ```
 
 | Function | Auth | Errors | Events |
@@ -295,7 +258,8 @@ pub struct Schedule { pub id: u64, pub employer: Address, pub recipient: Address
 | `set_fee_recipient(fee_recipient)` | admin | — | `fee_recipient_set` |
 | `propose_admin(new_admin)` / `accept_admin()` | admin / pending admin | — / `NoPendingAdmin` | `admin_proposed` / `admin_transferred` |
 | `pause()` / `unpause()` — pause blocks `fund`, `create_schedules`, `disburse`, `disburse_batch` | admin | — | `paused` / `unpaused` |
-| `upgrade(new_wasm_hash)` | admin | — | `upgraded` |
+| `propose_upgrade(new_wasm_hash)` / `execute_upgrade()` / `cancel_upgrade()` | admin | `NoPendingUpgrade`, `UpgradeNotReady` | `upgrade_proposed` / `upgraded` / `upgrade_cancelled` |
+| `pending_upgrade() -> Option<PendingUpgrade>` | none | — | — |
 | `get_schedule(schedule_id)`, `escrow_of(employer)`, `total_escrow()`, `admin()`, `pending_admin()`, `token()`, `fee_recipient()`, `fee_bps()`, `is_paused()` | none | `ScheduleNotFound` for `get_schedule` | — |
 
 Invariant: `sum(escrow_of(*)) == total_escrow() == payroll's USDC balance`
@@ -319,6 +283,8 @@ regenerates them).
 | 4 | `DuplicateReference` | A spend or refund reference was already used (idempotency guard). |
 | 5 | `NoPendingAdmin` | `accept_admin` was called while no admin transfer is pending. |
 | 6 | `Overflow` | An arithmetic operation would overflow. |
+| 7 | `NoPendingUpgrade` | `execute_upgrade` was called while no contract upgrade is pending. |
+| 8 | `UpgradeNotReady` | `execute_upgrade` was called before the 48-hour timelock delay elapsed. |
 <!-- errors:vault:end -->
 
 ### subscriptions
@@ -350,6 +316,9 @@ regenerates them).
 | 22 | `NoPendingAdmin` | `accept_admin` was called while no admin transfer is pending. |
 | 23 | `Overflow` | An arithmetic operation would overflow. |
 | 24 | `PayoutUnavailable` | The merchant's payout address cannot receive USDC: it has no USDC trustline, or the trustline is frozen. |
+| 25 | `NoPendingUpgrade` | `execute_upgrade` was called while no contract upgrade is pending. |
+| 26 | `UpgradeNotReady` | `execute_upgrade` was called before the 48-hour timelock delay elapsed. |
+| 27 | `ApplicationNotFound` | `approve_merchant` or `reject_merchant` was called for an address with no pending application. |
 <!-- errors:subscriptions:end -->
 
 ### payroll
@@ -374,6 +343,8 @@ regenerates them).
 | 15 | `BatchTooLarge` | A batch has more than `MAX_BATCH` (25) items. |
 | 16 | `NoPendingAdmin` | `accept_admin` was called while no admin transfer is pending. |
 | 17 | `Overflow` | An arithmetic operation would overflow. |
+| 18 | `NoPendingUpgrade` | `execute_upgrade` was called while no contract upgrade is pending. |
+| 19 | `UpgradeNotReady` | `execute_upgrade` was called before the 48-hour timelock delay elapsed. |
 <!-- errors:payroll:end -->
 
 ## Security model and trust assumptions
@@ -419,7 +390,7 @@ their employer can pause, resume or cancel them.
 **Admin powers and their limits.** The admin can pause, change fees (never
 above 1_000 bps = 10%), rotate roles, and `upgrade` the contract code in
 place (storage is kept). An upgrade can change any rule, so the admin key is
-the root of trust; a timelock on upgrades is a planned follow-up.
+the root of trust. Contract upgrades enforce a mandatory 48-hour (`172_800 s`) timelock delay (`UPGRADE_DELAY`) via `propose_upgrade` and `execute_upgrade` (with `cancel_upgrade` support), ensuring users have ample time to review bytecode changes or exit before execution.
 
 **Permissionless keepers.** Anyone may call `charge`, `charge_batch`,
 `disburse`, `disburse_batch`. They are time-gated per item and pay exactly
@@ -464,7 +435,12 @@ from the allowance alone.
 - **Payroll always back-pays.** Each `disburse` pays exactly one period and
   advances `next_due` by exactly one period. N missed periods are paid by N
   calls (each time-gated), and the (N+1)th call fails with `NotDue`.
-  Pausing a schedule does not move `next_due`: owed salary stays owed.
+  For fixed-term schedules (`payments_left > 0`), missed periods are paid
+  one per call until `payments_left` reaches 0, at which point the schedule
+  status becomes `Completed` and subsequent calls return `NotActive`. Calendar
+  end dates are not used (a payment count multiplied by the period provides
+  equivalent scheduling without timezone ambiguity). Pausing a schedule does
+  not move `next_due`: owed salary stays owed.
 
 ### Batches
 
@@ -536,7 +512,15 @@ from [Circle's faucet](https://faucet.circle.com/) ("Stellar Testnet").
 
 ## Build and test
 
-From a clean machine:
+With [`just`](https://just.systems):
+
+```sh
+just check                      # runs the complete CI validation gate in order
+```
+
+Or individual tasks: `just fmt`, `just clippy`, `just test`, `just build`, `just test-upgrade`, `just drift`.
+
+From a clean machine (raw commands):
 
 ```sh
 # Rust: rustup installs the pinned toolchain (1.99.1) and wasm32v1-none
@@ -694,6 +678,22 @@ identities in the CLI keystore and never reads or prints a secret key.
 Re-running day 1 reuses the recorded plan and subscription but creates a new
 salary schedule each time; `--day2` acts on the most recently recorded ids.
 
+### Source verification and release upgrades
+
+Tagged releases (`v*.*.*`) trigger `.github/workflows/release.yml`, building optimized contract WASM artifacts (`rubbi_vault.wasm`, `rubbi_subscriptions.wasm`, `rubbi_payroll.wasm`), computing sha256 checksums (`SHA256SUMS.txt`), and generating GitHub build provenance attestations so anyone can verify build transparency and link bytecode on [stellar.expert](https://stellar.expert).
+
+To verify that local deployment or release assets match:
+```sh
+scripts/verify-release.sh               # verify assets for tag in deployments/testnet.json
+scripts/verify-release.sh v0.1.0        # verify assets for an explicit release tag
+```
+
+To upgrade testnet contracts to matching release wasms:
+```sh
+scripts/upgrade-testnet.sh --dry-run    # simulate and print upgrade invocations
+scripts/upgrade-testnet.sh              # perform upgrades via rubbi-admin identity
+```
+
 ## Repository layout
 
 ```text
@@ -706,21 +706,18 @@ salary schedule each time; `--day2` acts on the most recently recorded ids.
 │   └── payroll/                 same layout
 ├── scripts/
 │   ├── deploy-testnet.sh        build + deploy + deployments/testnet.json
+│   ├── upgrade-testnet.sh       upgrade testnet contracts to release wasms
+│   ├── verify-release.sh        verify release wasms & checksums against deployments
 │   ├── smoke-testnet.sh         read-only checks of a deployment
 │   ├── demo-testnet.sh          exercise the testnet contracts with demo accounts
-│   ├── upgrade-testnet.sh       install an attested release on testnet in place
 │   └── check-readme-errors.sh   README error tables == errors.rs
 ├── deployments/
-│   ├── testnet.json             the shared testnet deployment record
 │   ├── testnet.example.json     shape of the deployment record
 │   └── testnet-demo.json        ids and tx hashes written by demo-testnet.sh
-├── docs/
-│   ├── TESTNET.md               testnet deployment, demo transactions, release and upgrade
-│   └── CONTRACT_INTERFACE.md    signers, events and errors per contract
 ├── legacy/evm/                  earlier Solidity implementation, kept for reference only
 └── .github/workflows/
     ├── ci.yml                   fmt, clippy, tests, wasm build, upgrade tests, shellcheck
-    └── release.yml              attested release builds on vX.Y.Z tags
+    └── release.yml              release wasm build, provenance attestation, github release
 ```
 
 ## Contributing via Drips Wave

@@ -325,7 +325,7 @@ fn merchant_with_plan(s: &Setup, amount: i128) -> (Address, Address, u32) {
     let (merchant, payout) = new_merchant(s);
     let plan_id = s
         .client
-        .create_plan(&merchant, &name(s, "Basic"), &amount, &MONTH);
+        .create_plan(&merchant, &name(s, "Basic"), &amount, &MONTH, &0);
     (merchant, payout, plan_id)
 }
 
@@ -496,7 +496,7 @@ fn create_plan_requires_exact_merchant_auth_and_assigns_sequential_ids() {
 
     let id = s
         .client
-        .create_plan(&merchant, &plan_name, &(5 * USDC), &MONTH);
+        .create_plan(&merchant, &plan_name, &(5 * USDC), &MONTH, &0);
     assert_eq!(id, 1);
     assert_eq!(
         s.env.auths(),
@@ -504,7 +504,7 @@ fn create_plan_requires_exact_merchant_auth_and_assigns_sequential_ids() {
             &s,
             &merchant,
             "create_plan",
-            (merchant.clone(), plan_name.clone(), 5 * USDC, MONTH).into_val(&s.env)
+            (merchant.clone(), plan_name.clone(), 5 * USDC, MONTH, 0u64).into_val(&s.env)
         )
     );
     assert_eq!(
@@ -534,12 +534,12 @@ fn create_plan_requires_exact_merchant_auth_and_assigns_sequential_ids() {
     let (other, _) = new_merchant(&s);
     assert_eq!(
         s.client
-            .create_plan(&other, &name(&s, "Pro"), &USDC, &MIN_PERIOD),
+            .create_plan(&other, &name(&s, "Pro"), &USDC, &MIN_PERIOD, &0),
         2
     );
     assert_eq!(
         s.client
-            .create_plan(&merchant, &name(&s, "Yearly"), &USDC, &MAX_PERIOD),
+            .create_plan(&merchant, &name(&s, "Yearly"), &USDC, &MAX_PERIOD, &0),
         3
     );
     assert_eq!(s.client.get_plan(&2).merchant, other);
@@ -561,7 +561,7 @@ fn create_plan_by_another_signer_fails() {
         );
         assert!(matches!(
             s.client
-                .try_create_plan(&merchant, &plan_name, &USDC, &MONTH),
+                .try_create_plan(&merchant, &plan_name, &USDC, &MONTH, &0),
             Err(Err(_))
         ));
     }
@@ -578,20 +578,20 @@ fn inactive_or_unknown_merchant_cannot_create_plans() {
     // Unknown merchant.
     assert_eq!(
         s.client
-            .try_create_plan(&Address::generate(&s.env), &plan_name, &USDC, &MONTH),
+            .try_create_plan(&Address::generate(&s.env), &plan_name, &USDC, &MONTH, &0),
         Err(Ok(Error::MerchantNotFound))
     );
     // Deactivated merchant.
     s.client.set_merchant_active(&merchant, &false);
     assert_eq!(
         s.client
-            .try_create_plan(&merchant, &plan_name, &USDC, &MONTH),
+            .try_create_plan(&merchant, &plan_name, &USDC, &MONTH, &0),
         Err(Ok(Error::MerchantInactive))
     );
     // Reactivated: works again.
     s.client.set_merchant_active(&merchant, &true);
     assert_eq!(
-        s.client.create_plan(&merchant, &plan_name, &USDC, &MONTH),
+        s.client.create_plan(&merchant, &plan_name, &USDC, &MONTH, &0),
         1
     );
 }
@@ -605,25 +605,25 @@ fn create_plan_validates_name_amount_and_period() {
     let long_name = name(&s, &"a".repeat(MAX_NAME_LEN as usize + 1));
     assert_eq!(
         s.client
-            .try_create_plan(&merchant, &long_name, &USDC, &MONTH),
+            .try_create_plan(&merchant, &long_name, &USDC, &MONTH, &0),
         Err(Ok(Error::NameTooLong))
     );
     for amount in [0_i128, -1, i128::MIN] {
         assert_eq!(
             s.client
-                .try_create_plan(&merchant, &ok_name, &amount, &MONTH),
+                .try_create_plan(&merchant, &ok_name, &amount, &MONTH, &0),
             Err(Ok(Error::InvalidAmount))
         );
     }
     for period in [0_u64, MIN_PERIOD - 1, MAX_PERIOD + 1, u64::MAX] {
         assert_eq!(
             s.client
-                .try_create_plan(&merchant, &ok_name, &USDC, &period),
+                .try_create_plan(&merchant, &ok_name, &USDC, &period, &0),
             Err(Ok(Error::InvalidPeriod))
         );
     }
     // Rejected calls did not consume an id.
-    assert_eq!(s.client.create_plan(&merchant, &ok_name, &USDC, &MONTH), 1);
+    assert_eq!(s.client.create_plan(&merchant, &ok_name, &USDC, &MONTH, &0), 1);
 }
 
 #[test]
@@ -712,8 +712,14 @@ fn admin_only_functions_reject_other_signers() {
             (stranger.clone(),).into_val(&s.env),
         );
         assert!(is_host_error(&s.client.try_propose_admin(&stranger)));
-        mock_auth_for(&s, signer, "upgrade", (fake_hash.clone(),).into_val(&s.env));
-        assert!(is_host_error(&s.client.try_upgrade(&fake_hash)));
+        mock_auth_for(&s, signer, "propose_upgrade", (fake_hash.clone(),).into_val(&s.env));
+        assert!(is_host_error(&s.client.try_propose_upgrade(&fake_hash)));
+
+        mock_auth_for(&s, signer, "execute_upgrade", ().into_val(&s.env));
+        assert!(is_host_error(&s.client.try_execute_upgrade()));
+
+        mock_auth_for(&s, signer, "cancel_upgrade", ().into_val(&s.env));
+        assert!(is_host_error(&s.client.try_cancel_upgrade()));
     }
 
     s.env.mock_all_auths();
@@ -722,6 +728,32 @@ fn admin_only_functions_reject_other_signers() {
     assert_eq!(s.client.fee_recipient(), s.fee_recipient);
     assert_eq!(s.client.pending_admin(), None);
     assert_eq!(s.client.admin(), s.admin);
+}
+
+#[test]
+fn upgrade_timelock_lifecycle() {
+    let s = setup();
+    s.env.mock_all_auths();
+    let fake_hash = BytesN::from_array(&s.env, &[0xAB; 32]);
+
+    // 1. execute_upgrade without proposal fails with NoPendingUpgrade
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::NoPendingUpgrade)));
+
+    // 2. Propose upgrade
+    let now = s.env.ledger().timestamp();
+    s.client.propose_upgrade(&fake_hash);
+    let pending = s.client.pending_upgrade().expect("pending upgrade set");
+    assert_eq!(pending.wasm_hash, fake_hash);
+    assert_eq!(pending.executable_at, now + UPGRADE_DELAY);
+
+    // 3. execute before timelock delay fails with UpgradeNotReady
+    s.env.ledger().with_mut(|li| li.timestamp += UPGRADE_DELAY - 1);
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::UpgradeNotReady)));
+
+    // 4. Cancel upgrade clears proposal and emits UpgradeCancelled
+    s.client.cancel_upgrade();
+    assert_eq!(s.client.pending_upgrade(), None);
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::NoPendingUpgrade)));
 }
 
 // ---- subscribe -----------------------------------------------------------------
@@ -756,6 +788,7 @@ fn subscribe_charges_first_period_and_sets_next_due() {
                 sub_id,
                 plan_id,
                 next_due: START + MONTH,
+                trial_until: 0,
             }
             .to_xdr(&s.env, &s.contract),
             events::Charged {
@@ -843,7 +876,7 @@ fn duplicate_subscribe_is_rejected() {
     let (merchant, _, _) = merchant_with_plan(&s, USDC);
     let other_plan = s
         .client
-        .create_plan(&merchant, &name(&s, "Other"), &USDC, &MONTH);
+        .create_plan(&merchant, &name(&s, "Other"), &USDC, &MONTH, &0);
     s.token
         .approve(&user, &s.contract, &USDC, &far_future_ledger(&s));
     assert_eq!(s.client.subscribe(&user, &other_plan), 2);
@@ -1110,7 +1143,7 @@ fn fee_split_is_exact_including_rounding() {
     // Amounts too small to produce a fee: the merchant gets everything.
     let tiny_plan = s
         .client
-        .create_plan(&merchant, &name(&s, "Tiny"), &199, &MONTH);
+        .create_plan(&merchant, &name(&s, "Tiny"), &199, &MONTH, &0);
     s.client.subscribe(&user, &tiny_plan);
     assert_eq!(s.token.balance(&s.fee_recipient), 61_728);
     assert_eq!(s.token.balance(&payout), amount - 61_728 + 199);
@@ -1722,7 +1755,7 @@ fn subscribers_keep_control_while_the_contract_is_paused() {
     let (merchant_b, _, _) = merchant_with_plan(&s, USDC);
     let plan_b = s
         .client
-        .create_plan(&merchant_b, &name(&s, "B"), &USDC, &MONTH);
+        .create_plan(&merchant_b, &name(&s, "B"), &USDC, &MONTH, &0);
     let b = s.client.subscribe(&user, &plan_b);
     s.client.pause_subscription(&user, &b);
 
@@ -1866,7 +1899,7 @@ fn every_state_change_emits_its_event() {
     s.client.set_merchant_active(&merchant, &true);
     expect_event!(
         s.client
-            .create_plan(&merchant, &plan_name, &(10 * USDC), &MONTH),
+            .create_plan(&merchant, &plan_name, &(10 * USDC), &MONTH, &0),
         events::PlanCreated {
             merchant: merchant.clone(),
             plan_id: 1,
@@ -1895,7 +1928,8 @@ fn every_state_change_emits_its_event() {
                 sub_id: 1,
                 plan_id: 1,
                 next_due: START + MONTH,
-            }
+            trial_until: 0,
+            user.clone()
             .to_xdr(&s.env, &s.contract),
             events::Charged {
                 subscriber: user.clone(),
@@ -2066,9 +2100,10 @@ fn on_chain_types_have_no_pii_fields() {
         name,
         amount,
         period,
+        trial_period,
         active,
     } = s.client.get_plan(&plan_id);
-    let _ = (id, name, amount, period, active);
+    let _ = (id, name, amount, period, trial_period, active);
     let Subscription {
         id,
         subscriber,
@@ -2102,25 +2137,60 @@ fn upgrade_by_admin_replaces_the_executable() {
         .deployer()
         .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&s.env, WASM));
 
+    let now = s.env.ledger().timestamp();
     mock_auth_for(
         &s,
         &s.admin,
-        "upgrade",
+        "propose_upgrade",
         (wasm_hash.clone(),).into_val(&s.env),
     );
-    s.client.upgrade(&wasm_hash);
+    s.client.propose_upgrade(&wasm_hash);
     assert_eq!(
         s.env.auths(),
         expected_auth(
             &s,
             &s.admin,
-            "upgrade",
+            "propose_upgrade",
             (wasm_hash.clone(),).into_val(&s.env)
         )
     );
     assert_eq!(
         last_events(&s),
-        [events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.contract)]
+        [events::UpgradeProposed {
+            wasm_hash: wasm_hash.clone(),
+            executable_at: now + UPGRADE_DELAY,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+
+    // Before delay expires: fails
+    mock_auth_for(&s, &s.admin, "execute_upgrade", ().into_val(&s.env));
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::UpgradeNotReady)));
+
+    // Advance time past 48-hour delay
+    s.env.ledger().with_mut(|li| li.timestamp += UPGRADE_DELAY);
+
+    mock_auth_for(&s, &s.admin, "execute_upgrade", ().into_val(&s.env));
+    s.client.execute_upgrade().unwrap();
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "execute_upgrade",
+            ().into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [
+            events::UpgradeProposed {
+                wasm_hash: wasm_hash.clone(),
+                executable_at: now + UPGRADE_DELAY,
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.contract)
+        ]
     );
 
     // Storage survived and the (now wasm) contract still works.
@@ -2130,4 +2200,423 @@ fn upgrade_by_admin_replaces_the_executable() {
     advance(&s, MONTH);
     assert!(s.client.charge(&sub_id));
     assert_eq!(s.token.balance(&user), 98 * USDC);
+}
+
+// ---- Merchant self-onboarding (Issue #16) ----------------------------------
+
+#[test]
+fn merchant_apply_approve_lifecycle() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+
+    assert_eq!(s.client.get_merchant(&merchant), None);
+    assert_eq!(s.client.get_merchant_application(&merchant), None);
+
+    // 1. Merchant applies with payout address (exact auth check)
+    let applied_time = s.env.ledger().timestamp();
+    mock_auth_for(
+        &s,
+        &merchant,
+        "apply_merchant",
+        (merchant.clone(), payout.clone()).into_val(&s.env),
+    );
+    s.client.apply_merchant(&merchant, &payout);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &merchant,
+            "apply_merchant",
+            (merchant.clone(), payout.clone()).into_val(&s.env),
+        )
+    );
+
+    // Application is recorded
+    assert_eq!(
+        s.client.get_merchant_application(&merchant),
+        Some(MerchantApplication {
+            payout: payout.clone(),
+            applied_at: applied_time,
+        })
+    );
+    // Not yet a merchant
+    assert_eq!(s.client.get_merchant(&merchant), None);
+
+    // Cannot create plan while pending
+    let plan_name = name(&s, "Pro Tier");
+    s.env.mock_all_auths();
+    assert_eq!(
+        s.client.try_create_plan(&merchant, &plan_name, &(10 * USDC), &MONTH, &0),
+        Err(Ok(Error::MerchantNotFound))
+    );
+
+    // 2. Admin approves the application (exact auth check)
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "approve_merchant",
+        (merchant.clone(),).into_val(&s.env),
+    );
+    s.client.approve_merchant(&merchant);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "approve_merchant",
+            (merchant.clone(),).into_val(&s.env),
+        )
+    );
+
+    // Application cleared, merchant now active
+    assert_eq!(s.client.get_merchant_application(&merchant), None);
+    assert_eq!(
+        s.client.get_merchant(&merchant),
+        Some(Merchant {
+            payout: payout.clone(),
+            active: true,
+        })
+    );
+
+    // Events emitted: MerchantApplied, MerchantAdded, MerchantApproved
+    let evs = last_events(&s);
+    assert_eq!(
+        evs,
+        [
+            events::MerchantApplied {
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+                applied_at: applied_time,
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::MerchantAdded {
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::MerchantApproved {
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+            }
+            .to_xdr(&s.env, &s.contract),
+        ]
+    );
+
+    // Now the approved merchant can create plans and accept subscribers
+    s.env.mock_all_auths();
+    let plan_id = s.client.create_plan(&merchant, &plan_name, &(10 * USDC), &MONTH, &0);
+    let user = subscriber(&s, 100 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    assert_eq!(sub_id, 1);
+}
+
+#[test]
+fn merchant_apply_reject_lifecycle() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+
+    // Merchant applies
+    s.env.mock_all_auths();
+    s.client.apply_merchant(&merchant, &payout);
+    assert!(s.client.get_merchant_application(&merchant).is_some());
+
+    // Admin rejects (exact auth check)
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "reject_merchant",
+        (merchant.clone(),).into_val(&s.env),
+    );
+    s.client.reject_merchant(&merchant);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "reject_merchant",
+            (merchant.clone(),).into_val(&s.env),
+        )
+    );
+
+    // Application removed, merchant not allowlisted
+    assert_eq!(s.client.get_merchant_application(&merchant), None);
+    assert_eq!(s.client.get_merchant(&merchant), None);
+
+    // Events emitted: MerchantRejected
+    let evs = last_events(&s);
+    assert_eq!(
+        evs,
+        [
+            events::MerchantApplied {
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+                applied_at: s.env.ledger().timestamp(),
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::MerchantRejected {
+                merchant: merchant.clone(),
+            }
+            .to_xdr(&s.env, &s.contract),
+        ]
+    );
+
+    // Creating plans fails
+    let plan_name = name(&s, "Tier");
+    assert_eq!(
+        s.client.try_create_plan(&merchant, &plan_name, &(5 * USDC), &MONTH, &0),
+        Err(Ok(Error::MerchantNotFound))
+    );
+}
+
+#[test]
+fn approve_or_reject_without_application_fails() {
+    let s = setup();
+    let stranger = Address::generate(&s.env);
+    s.env.mock_all_auths();
+
+    assert_eq!(
+        s.client.try_approve_merchant(&stranger),
+        Err(Ok(Error::ApplicationNotFound))
+    );
+    assert_eq!(
+        s.client.try_reject_merchant(&stranger),
+        Err(Ok(Error::ApplicationNotFound))
+    );
+}
+
+#[test]
+fn apply_by_existing_merchant_fails() {
+    let s = setup();
+    let (merchant, payout) = new_merchant(&s);
+    s.env.mock_all_auths();
+
+    assert_eq!(
+        s.client.try_apply_merchant(&merchant, &payout),
+        Err(Ok(Error::MerchantExists))
+    );
+}
+
+#[test]
+fn apply_with_unpayable_payout_fails() {
+    let (s, mock) = setup_with_mock_token();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+    mock.set_unpayable(&payout);
+
+    s.env.mock_all_auths();
+    assert_eq!(
+        s.client.try_apply_merchant(&merchant, &payout),
+        Err(Ok(Error::PayoutUnavailable))
+    );
+}
+
+#[test]
+fn non_admin_cannot_approve_or_reject_applications() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+    let stranger = Address::generate(&s.env);
+
+    s.env.mock_all_auths();
+    s.client.apply_merchant(&merchant, &payout);
+
+    for signer in [&merchant, &stranger, &s.fee_recipient] {
+        mock_auth_for(
+            &s,
+            signer,
+            "approve_merchant",
+            (merchant.clone(),).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_approve_merchant(&merchant),
+            Err(Err(_))
+        ));
+
+        mock_auth_for(
+            &s,
+            signer,
+            "reject_merchant",
+            (merchant.clone(),).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_reject_merchant(&merchant),
+            Err(Err(_))
+        ));
+    }
+    // Application is still intact
+    s.env.mock_all_auths();
+    assert!(s.client.get_merchant_application(&merchant).is_some());
+}
+
+#[test]
+fn reapplying_overwrites_pending_application() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout1 = Address::generate(&s.env);
+    let payout2 = Address::generate(&s.env);
+
+    s.env.mock_all_auths();
+    s.client.apply_merchant(&merchant, &payout1);
+    let t1 = s.env.ledger().timestamp();
+    assert_eq!(
+        s.client.get_merchant_application(&merchant).unwrap().payout,
+        payout1
+    );
+
+    advance(&s, DAY);
+    s.client.apply_merchant(&merchant, &payout2);
+    let app2 = s.client.get_merchant_application(&merchant).unwrap();
+    assert_eq!(app2.payout, payout2);
+    assert_eq!(app2.applied_at, t1 + DAY);
+}
+
+// ---- Subscription Trial Periods (Issue #17) --------------------------------
+
+#[test]
+fn subscription_trial_period_lifecycle_and_first_charge() {
+    let s = setup();
+    let (merchant, payout) = new_merchant(&s);
+    let plan_name = name(&s, "Free Trial Plan");
+    let trial_period = 14 * DAY;
+
+    // 1. Merchant creates a plan with 14-day free trial
+    s.env.mock_all_auths();
+    let plan_id = s.client.create_plan(
+        &merchant,
+        &plan_name,
+        &(20 * USDC),
+        &MONTH,
+        &trial_period,
+    );
+    let plan = s.client.get_plan(&plan_id);
+    assert_eq!(plan.trial_period, trial_period);
+
+    // 2. Subscriber approves contract allowance for the recurring fee
+    let user = subscriber(&s, 100 * USDC);
+    s.token.approve(
+        &user,
+        &s.contract,
+        &(100 * USDC),
+        &far_future_ledger(&s),
+    );
+
+    // 3. Subscribe: zero funds pulled at sign-up, next_due set to trial end
+    let now = s.env.ledger().timestamp();
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    assert_eq!(sub_id, 1);
+    assert_eq!(s.token.balance(&user), 100 * USDC); // Balance untouched!
+    assert_eq!(s.token.balance(&payout), 0);
+
+    let sub = s.client.get_subscription(&sub_id);
+    assert_eq!(sub.next_due, now + trial_period);
+    assert_eq!(sub.status, SubStatus::Active);
+
+    // Event check: Subscribed with trial_until, NO Charged event emitted
+    assert_eq!(
+        last_events(&s),
+        [
+            events::Subscribed {
+                subscriber: user.clone(),
+                sub_id,
+                plan_id,
+                next_due: now + trial_period,
+                trial_until: now + trial_period,
+            }
+            .to_xdr(&s.env, &s.contract),
+        ]
+    );
+
+    // 4. Calling charge during trial fails with NotDue
+    assert_eq!(s.client.try_charge(&sub_id), Err(Ok(Error::NotDue)));
+
+    // 5. Advance time past the 14-day trial: charge succeeds and pulls first payment
+    advance(&s, trial_period);
+    assert!(s.client.charge(&sub_id));
+    assert_eq!(s.token.balance(&user), 80 * USDC); // 20 USDC charged
+    assert_eq!(s.token.balance(&payout), 19 * USDC); // 20 USDC minus 5% fee (1 USDC)
+    assert_eq!(s.token.balance(&s.fee_recipient), 1 * USDC);
+
+    let sub_after = s.client.get_subscription(&sub_id);
+    assert_eq!(sub_after.next_due, now + trial_period + MONTH);
+}
+
+#[test]
+fn subscription_trial_requires_sufficient_allowance() {
+    let s = setup();
+    let (merchant, _payout) = new_merchant(&s);
+    let plan_name = name(&s, "Trial Plan");
+    let trial_period = 7 * DAY;
+
+    s.env.mock_all_auths();
+    let plan_id = s.client.create_plan(
+        &merchant,
+        &plan_name,
+        &(50 * USDC),
+        &MONTH,
+        &trial_period,
+    );
+
+    // User has funds but zero allowance
+    let user = subscriber(&s, 100 * USDC);
+    s.token.approve(&user, &s.contract, &0, &far_future_ledger(&s));
+
+    assert_eq!(
+        s.client.try_subscribe(&user, &plan_id),
+        Err(Ok(Error::AllowanceTooLow))
+    );
+}
+
+#[test]
+fn cannot_repeat_cancelled_trial_on_same_plan() {
+    let s = setup();
+    let (merchant, _payout) = new_merchant(&s);
+    let plan_name = name(&s, "Trial Plan");
+    let trial_period = 7 * DAY;
+
+    s.env.mock_all_auths();
+    let plan_id = s.client.create_plan(
+        &merchant,
+        &plan_name,
+        &(15 * USDC),
+        &MONTH,
+        &trial_period,
+    );
+
+    let user = subscriber(&s, 50 * USDC);
+    s.token.approve(&user, &s.contract, &(50 * USDC), &far_future_ledger(&s));
+
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    assert_eq!(s.token.balance(&user), 50 * USDC);
+
+    // Cancel during trial
+    s.client.cancel_subscription(&user, &sub_id);
+    assert_eq!(s.client.sub_id_of(&user, &plan_id), None);
+
+    // Re-subscribing to the same trial plan is rejected (one trial per subscriber)
+    assert_eq!(
+        s.client.try_subscribe(&user, &plan_id),
+        Err(Ok(Error::TrialAlreadyUsed))
+    );
+}
+
+#[test]
+fn trial_period_cannot_exceed_max_period() {
+    let s = setup();
+    let (merchant, _payout) = new_merchant(&s);
+    let plan_name = name(&s, "Too Long Trial");
+    let invalid_trial = MAX_PERIOD + 1;
+
+    s.env.mock_all_auths();
+    assert_eq!(
+        s.client.try_create_plan(
+            &merchant,
+            &plan_name,
+            &(10 * USDC),
+            &MONTH,
+            &invalid_trial
+        ),
+        Err(Ok(Error::InvalidPeriod))
+    );
 }
