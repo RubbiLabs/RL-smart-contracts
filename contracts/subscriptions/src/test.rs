@@ -712,8 +712,14 @@ fn admin_only_functions_reject_other_signers() {
             (stranger.clone(),).into_val(&s.env),
         );
         assert!(is_host_error(&s.client.try_propose_admin(&stranger)));
-        mock_auth_for(&s, signer, "upgrade", (fake_hash.clone(),).into_val(&s.env));
-        assert!(is_host_error(&s.client.try_upgrade(&fake_hash)));
+        mock_auth_for(&s, signer, "propose_upgrade", (fake_hash.clone(),).into_val(&s.env));
+        assert!(is_host_error(&s.client.try_propose_upgrade(&fake_hash)));
+
+        mock_auth_for(&s, signer, "execute_upgrade", ().into_val(&s.env));
+        assert!(is_host_error(&s.client.try_execute_upgrade()));
+
+        mock_auth_for(&s, signer, "cancel_upgrade", ().into_val(&s.env));
+        assert!(is_host_error(&s.client.try_cancel_upgrade()));
     }
 
     s.env.mock_all_auths();
@@ -722,6 +728,32 @@ fn admin_only_functions_reject_other_signers() {
     assert_eq!(s.client.fee_recipient(), s.fee_recipient);
     assert_eq!(s.client.pending_admin(), None);
     assert_eq!(s.client.admin(), s.admin);
+}
+
+#[test]
+fn upgrade_timelock_lifecycle() {
+    let s = setup();
+    s.env.mock_all_auths();
+    let fake_hash = BytesN::from_array(&s.env, &[0xAB; 32]);
+
+    // 1. execute_upgrade without proposal fails with NoPendingUpgrade
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::NoPendingUpgrade)));
+
+    // 2. Propose upgrade
+    let now = s.env.ledger().timestamp();
+    s.client.propose_upgrade(&fake_hash);
+    let pending = s.client.pending_upgrade().expect("pending upgrade set");
+    assert_eq!(pending.wasm_hash, fake_hash);
+    assert_eq!(pending.executable_at, now + UPGRADE_DELAY);
+
+    // 3. execute before timelock delay fails with UpgradeNotReady
+    s.env.ledger().with_mut(|li| li.timestamp += UPGRADE_DELAY - 1);
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::UpgradeNotReady)));
+
+    // 4. Cancel upgrade clears proposal and emits UpgradeCancelled
+    s.client.cancel_upgrade();
+    assert_eq!(s.client.pending_upgrade(), None);
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::NoPendingUpgrade)));
 }
 
 // ---- subscribe -----------------------------------------------------------------
@@ -2102,25 +2134,60 @@ fn upgrade_by_admin_replaces_the_executable() {
         .deployer()
         .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&s.env, WASM));
 
+    let now = s.env.ledger().timestamp();
     mock_auth_for(
         &s,
         &s.admin,
-        "upgrade",
+        "propose_upgrade",
         (wasm_hash.clone(),).into_val(&s.env),
     );
-    s.client.upgrade(&wasm_hash);
+    s.client.propose_upgrade(&wasm_hash);
     assert_eq!(
         s.env.auths(),
         expected_auth(
             &s,
             &s.admin,
-            "upgrade",
+            "propose_upgrade",
             (wasm_hash.clone(),).into_val(&s.env)
         )
     );
     assert_eq!(
         last_events(&s),
-        [events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.contract)]
+        [events::UpgradeProposed {
+            wasm_hash: wasm_hash.clone(),
+            executable_at: now + UPGRADE_DELAY,
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+
+    // Before delay expires: fails
+    mock_auth_for(&s, &s.admin, "execute_upgrade", ().into_val(&s.env));
+    assert_eq!(s.client.try_execute_upgrade(), Err(Ok(Error::UpgradeNotReady)));
+
+    // Advance time past 48-hour delay
+    s.env.ledger().with_mut(|li| li.timestamp += UPGRADE_DELAY);
+
+    mock_auth_for(&s, &s.admin, "execute_upgrade", ().into_val(&s.env));
+    s.client.execute_upgrade().unwrap();
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "execute_upgrade",
+            ().into_val(&s.env)
+        )
+    );
+    assert_eq!(
+        last_events(&s),
+        [
+            events::UpgradeProposed {
+                wasm_hash: wasm_hash.clone(),
+                executable_at: now + UPGRADE_DELAY,
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::Upgraded { wasm_hash }.to_xdr(&s.env, &s.contract)
+        ]
     );
 
     // Storage survived and the (now wasm) contract still works.
@@ -2130,4 +2197,274 @@ fn upgrade_by_admin_replaces_the_executable() {
     advance(&s, MONTH);
     assert!(s.client.charge(&sub_id));
     assert_eq!(s.token.balance(&user), 98 * USDC);
+}
+
+// ---- Merchant self-onboarding (Issue #16) ----------------------------------
+
+#[test]
+fn merchant_apply_approve_lifecycle() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+
+    assert_eq!(s.client.get_merchant(&merchant), None);
+    assert_eq!(s.client.get_merchant_application(&merchant), None);
+
+    // 1. Merchant applies with payout address (exact auth check)
+    let applied_time = s.env.ledger().timestamp();
+    mock_auth_for(
+        &s,
+        &merchant,
+        "apply_merchant",
+        (merchant.clone(), payout.clone()).into_val(&s.env),
+    );
+    s.client.apply_merchant(&merchant, &payout);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &merchant,
+            "apply_merchant",
+            (merchant.clone(), payout.clone()).into_val(&s.env),
+        )
+    );
+
+    // Application is recorded
+    assert_eq!(
+        s.client.get_merchant_application(&merchant),
+        Some(MerchantApplication {
+            payout: payout.clone(),
+            applied_at: applied_time,
+        })
+    );
+    // Not yet a merchant
+    assert_eq!(s.client.get_merchant(&merchant), None);
+
+    // Cannot create plan while pending
+    let plan_name = name(&s, "Pro Tier");
+    s.env.mock_all_auths();
+    assert_eq!(
+        s.client.try_create_plan(&merchant, &plan_name, &(10 * USDC), &MONTH),
+        Err(Ok(Error::MerchantNotFound))
+    );
+
+    // 2. Admin approves the application (exact auth check)
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "approve_merchant",
+        (merchant.clone(),).into_val(&s.env),
+    );
+    s.client.approve_merchant(&merchant);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "approve_merchant",
+            (merchant.clone(),).into_val(&s.env),
+        )
+    );
+
+    // Application cleared, merchant now active
+    assert_eq!(s.client.get_merchant_application(&merchant), None);
+    assert_eq!(
+        s.client.get_merchant(&merchant),
+        Some(Merchant {
+            payout: payout.clone(),
+            active: true,
+        })
+    );
+
+    // Events emitted: MerchantApplied, MerchantAdded, MerchantApproved
+    let evs = last_events(&s);
+    assert_eq!(
+        evs,
+        [
+            events::MerchantApplied {
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+                applied_at: applied_time,
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::MerchantAdded {
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::MerchantApproved {
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+            }
+            .to_xdr(&s.env, &s.contract),
+        ]
+    );
+
+    // Now the approved merchant can create plans and accept subscribers
+    s.env.mock_all_auths();
+    let plan_id = s.client.create_plan(&merchant, &plan_name, &(10 * USDC), &MONTH);
+    let user = subscriber(&s, 100 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    assert_eq!(sub_id, 1);
+}
+
+#[test]
+fn merchant_apply_reject_lifecycle() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+
+    // Merchant applies
+    s.env.mock_all_auths();
+    s.client.apply_merchant(&merchant, &payout);
+    assert!(s.client.get_merchant_application(&merchant).is_some());
+
+    // Admin rejects (exact auth check)
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "reject_merchant",
+        (merchant.clone(),).into_val(&s.env),
+    );
+    s.client.reject_merchant(&merchant);
+    assert_eq!(
+        s.env.auths(),
+        expected_auth(
+            &s,
+            &s.admin,
+            "reject_merchant",
+            (merchant.clone(),).into_val(&s.env),
+        )
+    );
+
+    // Application removed, merchant not allowlisted
+    assert_eq!(s.client.get_merchant_application(&merchant), None);
+    assert_eq!(s.client.get_merchant(&merchant), None);
+
+    // Events emitted: MerchantRejected
+    let evs = last_events(&s);
+    assert_eq!(
+        evs,
+        [
+            events::MerchantApplied {
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+                applied_at: s.env.ledger().timestamp(),
+            }
+            .to_xdr(&s.env, &s.contract),
+            events::MerchantRejected {
+                merchant: merchant.clone(),
+            }
+            .to_xdr(&s.env, &s.contract),
+        ]
+    );
+
+    // Creating plans fails
+    let plan_name = name(&s, "Tier");
+    assert_eq!(
+        s.client.try_create_plan(&merchant, &plan_name, &(5 * USDC), &MONTH),
+        Err(Ok(Error::MerchantNotFound))
+    );
+}
+
+#[test]
+fn approve_or_reject_without_application_fails() {
+    let s = setup();
+    let stranger = Address::generate(&s.env);
+    s.env.mock_all_auths();
+
+    assert_eq!(
+        s.client.try_approve_merchant(&stranger),
+        Err(Ok(Error::ApplicationNotFound))
+    );
+    assert_eq!(
+        s.client.try_reject_merchant(&stranger),
+        Err(Ok(Error::ApplicationNotFound))
+    );
+}
+
+#[test]
+fn apply_by_existing_merchant_fails() {
+    let s = setup();
+    let (merchant, payout) = new_merchant(&s);
+    s.env.mock_all_auths();
+
+    assert_eq!(
+        s.client.try_apply_merchant(&merchant, &payout),
+        Err(Ok(Error::MerchantExists))
+    );
+}
+
+#[test]
+fn apply_with_unpayable_payout_fails() {
+    let (s, mock) = setup_with_mock_token();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+    mock.set_unpayable(&payout);
+
+    s.env.mock_all_auths();
+    assert_eq!(
+        s.client.try_apply_merchant(&merchant, &payout),
+        Err(Ok(Error::PayoutUnavailable))
+    );
+}
+
+#[test]
+fn non_admin_cannot_approve_or_reject_applications() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout = Address::generate(&s.env);
+    let stranger = Address::generate(&s.env);
+
+    s.env.mock_all_auths();
+    s.client.apply_merchant(&merchant, &payout);
+
+    for signer in [&merchant, &stranger, &s.fee_recipient] {
+        mock_auth_for(
+            &s,
+            signer,
+            "approve_merchant",
+            (merchant.clone(),).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_approve_merchant(&merchant),
+            Err(Err(_))
+        ));
+
+        mock_auth_for(
+            &s,
+            signer,
+            "reject_merchant",
+            (merchant.clone(),).into_val(&s.env),
+        );
+        assert!(matches!(
+            s.client.try_reject_merchant(&merchant),
+            Err(Err(_))
+        ));
+    }
+    // Application is still intact
+    s.env.mock_all_auths();
+    assert!(s.client.get_merchant_application(&merchant).is_some());
+}
+
+#[test]
+fn reapplying_overwrites_pending_application() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+    let payout1 = Address::generate(&s.env);
+    let payout2 = Address::generate(&s.env);
+
+    s.env.mock_all_auths();
+    s.client.apply_merchant(&merchant, &payout1);
+    let t1 = s.env.ledger().timestamp();
+    assert_eq!(
+        s.client.get_merchant_application(&merchant).unwrap().payout,
+        payout1
+    );
+
+    advance(&s, DAY);
+    s.client.apply_merchant(&merchant, &payout2);
+    let app2 = s.client.get_merchant_application(&merchant).unwrap();
+    assert_eq!(app2.payout, payout2);
+    assert_eq!(app2.applied_at, t1 + DAY);
 }
