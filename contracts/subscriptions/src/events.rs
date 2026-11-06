@@ -6,6 +6,33 @@
 
 use soroban_sdk::{contractevent, Address, BytesN, String, Symbol};
 
+/// `merchant_applied`: `merchant` applied for onboarding with `payout` at `applied_at`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantApplied {
+    #[topic]
+    pub merchant: Address,
+    pub payout: Address,
+    pub applied_at: u64,
+}
+
+/// `merchant_approved`: the admin approved `merchant` application with `payout`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantApproved {
+    #[topic]
+    pub merchant: Address,
+    pub payout: Address,
+}
+
+/// `merchant_rejected`: the admin rejected `merchant` application.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantRejected {
+    #[topic]
+    pub merchant: Address,
+}
+
 /// `merchant_added`: the admin allowlisted `merchant`, paying out to
 /// `payout`.
 #[contractevent]
@@ -175,7 +202,20 @@ pub struct Paused {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Unpaused {}
 
-/// `upgraded`: the contract executable will be replaced by `wasm_hash`.
+/// `upgrade_proposed`: the admin proposed upgrading the contract to `wasm_hash` at `executable_at`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposed {
+    pub wasm_hash: BytesN<32>,
+    pub executable_at: u64,
+}
+
+/// `upgrade_cancelled`: the admin cancelled the pending upgrade proposal.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeCancelled {}
+
+/// `upgraded`: the contract executable was replaced by `wasm_hash`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Upgraded {

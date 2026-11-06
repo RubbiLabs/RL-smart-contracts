@@ -1,3 +1,10 @@
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub executable_at: u64,
+}
+
 //! Storage keys, TTL policy and typed accessors.
 //!
 //! Tiers:
@@ -12,7 +19,7 @@
 
 use soroban_sdk::{contracttype, Address, Env};
 
-use crate::{Merchant, Plan, Subscription};
+use crate::{Merchant, MerchantApplication, Plan, Subscription};
 
 /// Ledgers per day. Stellar closes a ledger roughly every 5 seconds
 /// (measured on 2026-10-27 over 100 consecutive ledgers on both testnet and
@@ -38,6 +45,8 @@ pub enum DataKey {
     Admin,
     /// Proposed admin awaiting `accept_admin` (instance).
     PendingAdmin,
+    /// Proposed contract upgrade awaiting `execute_upgrade` (instance).
+    PendingUpgrade,
     /// USDC Stellar Asset Contract address (instance).
     Token,
     /// Address that receives the fee share of every charge (instance).
@@ -50,6 +59,8 @@ pub enum DataKey {
     NextPlanId,
     /// Next subscription id to assign; ids start at 1 (instance).
     NextSubId,
+    /// A pending merchant application (persistent).
+    MerchantApplication(Address),
     /// An allowlisted merchant (persistent).
     Merchant(Address),
     /// A plan by id (persistent).
@@ -119,6 +130,20 @@ pub fn set_pending_admin(env: &Env, pending: &Address) {
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
 }
+
+pub fn get_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
+    env.storage().instance().get(&DataKey::PendingUpgrade)
+}
+
+pub fn set_pending_upgrade(env: &Env, upgrade: &PendingUpgrade) {
+    env.storage().instance().set(&DataKey::PendingUpgrade, upgrade);
+}
+
+pub fn clear_pending_upgrade(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingUpgrade);
+}
+
+
 
 pub fn get_token(env: &Env) -> Address {
     env.storage()
@@ -190,6 +215,20 @@ pub fn next_sub_id(env: &Env) -> u64 {
 }
 
 // ---- persistent: merchants and plans ---------------------------------------
+
+pub fn get_merchant_application(env: &Env, merchant: &Address) -> Option<MerchantApplication> {
+    get_persistent(env, &DataKey::MerchantApplication(merchant.clone()))
+}
+
+pub fn set_merchant_application(env: &Env, merchant: &Address, app: &MerchantApplication) {
+    set_persistent(env, &DataKey::MerchantApplication(merchant.clone()), app);
+}
+
+pub fn clear_merchant_application(env: &Env, merchant: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::MerchantApplication(merchant.clone()));
+}
 
 pub fn get_merchant(env: &Env, merchant: &Address) -> Option<Merchant> {
     get_persistent(env, &DataKey::Merchant(merchant.clone()))
