@@ -321,13 +321,13 @@ fn deposit_and_withdraw_emit_events() {
 // ---- 3. only the operator can settle (L1) -------------------------------------
 
 #[test]
-fn settle_requires_exact_operator_auth() {
+fn load_requires_exact_operator_auth() {
     let s = setup();
     let user = funded_user(&s, 100);
     s.client.deposit(&user, &100);
     let r = reference(&s, 1);
 
-    s.client.settle_card_spend(&user, &40, &r);
+    s.client.load_card(&user, &40, &r);
     assert_eq!(
         s.env.auths(),
         std::vec![(
@@ -335,7 +335,7 @@ fn settle_requires_exact_operator_auth() {
             AuthorizedInvocation {
                 function: AuthorizedFunction::Contract((
                     s.vault.clone(),
-                    Symbol::new(&s.env, "settle_card_spend"),
+                    Symbol::new(&s.env, "load_card"),
                     (user.clone(), 40_i128, r.clone()).into_val(&s.env),
                 )),
                 sub_invocations: std::vec![],
@@ -349,7 +349,7 @@ fn settle_requires_exact_operator_auth() {
 }
 
 #[test]
-fn settle_by_non_operator_fails() {
+fn load_by_non_operator_fails() {
     let s = setup();
     let user = funded_user(&s, 100);
     s.client.deposit(&user, &100);
@@ -361,12 +361,12 @@ fn settle_by_non_operator_fails() {
             address: signer,
             invoke: &MockAuthInvoke {
                 contract: &s.vault,
-                fn_name: "settle_card_spend",
+                fn_name: "load_card",
                 args: (user.clone(), 40_i128, r.clone()).into_val(&s.env),
                 sub_invokes: &[],
             },
         }]);
-        let res = s.client.try_settle_card_spend(&user, &40, &r);
+        let res = s.client.try_load_card(&user, &40, &r);
         assert!(matches!(res, Err(Err(_))), "expected a host auth error");
     }
 
@@ -378,26 +378,26 @@ fn settle_by_non_operator_fails() {
 // ---- 4. duplicate spend reference rejected ------------------------------------
 
 #[test]
-fn duplicate_spend_reference_is_rejected() {
+fn duplicate_load_reference_is_rejected() {
     let s = setup();
     let user = funded_user(&s, 100);
     s.client.deposit(&user, &100);
     let r = reference(&s, 7);
 
-    s.client.settle_card_spend(&user, &10, &r);
+    s.client.load_card(&user, &10, &r);
     assert_eq!(
-        s.client.try_settle_card_spend(&user, &10, &r),
+        s.client.try_load_card(&user, &10, &r),
         Err(Ok(Error::DuplicateReference))
     );
     // Same reference, different user or amount: still a duplicate.
     let other = funded_user(&s, 100);
     s.client.deposit(&other, &100);
     assert_eq!(
-        s.client.try_settle_card_spend(&other, &5, &r),
+        s.client.try_load_card(&other, &5, &r),
         Err(Ok(Error::DuplicateReference))
     );
     // A fresh reference works.
-    s.client.settle_card_spend(&user, &10, &reference(&s, 8));
+    s.client.load_card(&user, &10, &reference(&s, 8));
 
     assert_eq!(s.client.balance(&user), 80);
     assert_eq!(s.client.balance(&other), 100);
@@ -407,13 +407,13 @@ fn duplicate_spend_reference_is_rejected() {
 // ---- 5. refund requires treasury auth; separate reference namespace ----------
 
 #[test]
-fn refund_requires_exact_treasury_auth() {
+fn unload_requires_exact_treasury_auth() {
     let s = setup();
     let user = funded_user(&s, 0);
     s.token_admin.mint(&s.treasury, &500);
     let r = reference(&s, 3);
 
-    s.client.credit_refund(&user, &120, &r);
+    s.client.unload_card(&user, &120, &r);
     assert_eq!(
         s.env.auths(),
         std::vec![(
@@ -421,7 +421,7 @@ fn refund_requires_exact_treasury_auth() {
             AuthorizedInvocation {
                 function: AuthorizedFunction::Contract((
                     s.vault.clone(),
-                    Symbol::new(&s.env, "credit_refund"),
+                    Symbol::new(&s.env, "unload_card"),
                     (user.clone(), 120_i128, r.clone()).into_val(&s.env),
                 )),
                 sub_invocations: std::vec![AuthorizedInvocation {
@@ -442,7 +442,7 @@ fn refund_requires_exact_treasury_auth() {
 }
 
 #[test]
-fn refund_by_non_treasury_fails() {
+fn unload_by_non_treasury_fails() {
     let s = setup();
     let user = funded_user(&s, 0);
     s.token_admin.mint(&s.treasury, &500);
@@ -453,7 +453,7 @@ fn refund_by_non_treasury_fails() {
             address: signer,
             invoke: &MockAuthInvoke {
                 contract: &s.vault,
-                fn_name: "credit_refund",
+                fn_name: "unload_card",
                 args: (user.clone(), 120_i128, r.clone()).into_val(&s.env),
                 sub_invokes: &[MockAuthInvoke {
                     contract: &s.token.address,
@@ -463,7 +463,7 @@ fn refund_by_non_treasury_fails() {
                 }],
             },
         }]);
-        let res = s.client.try_credit_refund(&user, &120, &r);
+        let res = s.client.try_unload_card(&user, &120, &r);
         assert!(matches!(res, Err(Err(_))), "expected a host auth error");
     }
 
@@ -473,7 +473,7 @@ fn refund_by_non_treasury_fails() {
 }
 
 #[test]
-fn spend_and_refund_references_are_separate_namespaces() {
+fn load_and_unload_references_are_separate_namespaces() {
     let s = setup();
     let user = funded_user(&s, 100);
     s.client.deposit(&user, &100);
@@ -481,15 +481,15 @@ fn spend_and_refund_references_are_separate_namespaces() {
     let r = reference(&s, 9);
 
     // The same 32 bytes can be used once as a spend and once as a refund...
-    s.client.settle_card_spend(&user, &30, &r);
-    s.client.credit_refund(&user, &30, &r);
+    s.client.load_card(&user, &30, &r);
+    s.client.unload_card(&user, &30, &r);
     // ...but not twice in either namespace.
     assert_eq!(
-        s.client.try_settle_card_spend(&user, &1, &r),
+        s.client.try_load_card(&user, &1, &r),
         Err(Ok(Error::DuplicateReference))
     );
     assert_eq!(
-        s.client.try_credit_refund(&user, &1, &r),
+        s.client.try_unload_card(&user, &1, &r),
         Err(Ok(Error::DuplicateReference))
     );
     assert_eq!(s.client.balance(&user), 100);
@@ -498,7 +498,7 @@ fn spend_and_refund_references_are_separate_namespaces() {
 // ---- 8 (cont). amount <= 0 rejected on settle and refund ----------------------
 
 #[test]
-fn settle_and_refund_reject_non_positive_amounts() {
+fn load_and_unload_reject_non_positive_amounts() {
     let s = setup();
     let user = funded_user(&s, 100);
     s.client.deposit(&user, &50);
@@ -507,32 +507,32 @@ fn settle_and_refund_reject_non_positive_amounts() {
     for amount in [0_i128, -1, i128::MIN] {
         assert_eq!(
             s.client
-                .try_settle_card_spend(&user, &amount, &reference(&s, 1)),
+                .try_load_card(&user, &amount, &reference(&s, 1)),
             Err(Ok(Error::InvalidAmount))
         );
         assert_eq!(
             s.client
-                .try_credit_refund(&user, &amount, &reference(&s, 2)),
+                .try_unload_card(&user, &amount, &reference(&s, 2)),
             Err(Ok(Error::InvalidAmount))
         );
     }
     // The references were not consumed by the rejected calls.
-    s.client.settle_card_spend(&user, &1, &reference(&s, 1));
-    s.client.credit_refund(&user, &1, &reference(&s, 2));
+    s.client.load_card(&user, &1, &reference(&s, 1));
+    s.client.unload_card(&user, &1, &reference(&s, 2));
     assert_eq!(s.client.balance(&user), 50);
 }
 
 // ---- 12. settle more than balance ---------------------------------------------
 
 #[test]
-fn settle_more_than_balance_fails_and_keeps_reference_unused() {
+fn load_more_than_balance_fails_and_keeps_reference_unused() {
     let s = setup();
     let user = funded_user(&s, 100);
     s.client.deposit(&user, &60);
     let r = reference(&s, 5);
 
     assert_eq!(
-        s.client.try_settle_card_spend(&user, &61, &r),
+        s.client.try_load_card(&user, &61, &r),
         Err(Ok(Error::InsufficientBalance))
     );
     assert_eq!(s.client.balance(&user), 60);
@@ -541,7 +541,7 @@ fn settle_more_than_balance_fails_and_keeps_reference_unused() {
     assert_eq!(s.token.balance(&s.treasury), 0);
 
     // The failed call did not consume the reference.
-    s.client.settle_card_spend(&user, &60, &r);
+    s.client.load_card(&user, &60, &r);
     assert_eq!(s.client.balance(&user), 0);
     assert_eq!(s.token.balance(&s.treasury), 60);
 }
@@ -549,17 +549,17 @@ fn settle_more_than_balance_fails_and_keeps_reference_unused() {
 // ---- 14 (cont). settle and refund events --------------------------------------
 
 #[test]
-fn settle_and_refund_emit_events() {
+fn load_and_unload_emit_events() {
     let s = setup();
     let user = funded_user(&s, 100);
     s.client.deposit(&user, &100);
     s.token_admin.mint(&s.treasury, &500);
 
     let r1 = reference(&s, 11);
-    s.client.settle_card_spend(&user, &25, &r1);
+    s.client.load_card(&user, &25, &r1);
     assert_eq!(
         s.env.events().all().filter_by_contract(&s.vault),
-        [events::CardSpendSettled {
+        [events::CardLoaded {
             user: user.clone(),
             amount: 25,
             reference: r1,
@@ -568,10 +568,10 @@ fn settle_and_refund_emit_events() {
     );
 
     let r2 = reference(&s, 12);
-    s.client.credit_refund(&user, &5, &r2);
+    s.client.unload_card(&user, &5, &r2);
     assert_eq!(
         s.env.events().all().filter_by_contract(&s.vault),
-        [events::RefundCredited {
+        [events::CardUnloaded {
             user: user.clone(),
             amount: 5,
             reference: r2,
@@ -603,7 +603,7 @@ fn mock_auth_for(
 // ---- 6. pause blocks deposit and settle, allows withdraw ----------------------
 
 #[test]
-fn pause_blocks_deposit_and_settle_but_allows_withdraw_and_refund() {
+fn pause_blocks_deposit_and_load_but_allows_withdraw_and_unload() {
     let s = setup();
     let user = funded_user(&s, 100);
     s.client.deposit(&user, &80);
@@ -615,7 +615,7 @@ fn pause_blocks_deposit_and_settle_but_allows_withdraw_and_refund() {
     assert_eq!(s.client.try_deposit(&user, &10), Err(Ok(Error::Paused)));
     assert_eq!(
         s.client
-            .try_settle_card_spend(&user, &10, &reference(&s, 1)),
+            .try_load_card(&user, &10, &reference(&s, 1)),
         Err(Ok(Error::Paused))
     );
     // Users can always get their money out.
@@ -623,13 +623,13 @@ fn pause_blocks_deposit_and_settle_but_allows_withdraw_and_refund() {
     assert_eq!(s.client.balance(&user), 50);
     assert_eq!(s.token.balance(&user), 50);
     // Refunds in favour of users are not blocked either.
-    s.client.credit_refund(&user, &5, &reference(&s, 2));
+    s.client.unload_card(&user, &5, &reference(&s, 2));
     assert_eq!(s.client.balance(&user), 55);
 
     s.client.unpause();
     assert!(!s.client.is_paused());
     s.client.deposit(&user, &10);
-    s.client.settle_card_spend(&user, &10, &reference(&s, 1));
+    s.client.load_card(&user, &10, &reference(&s, 1));
     assert_eq!(s.client.balance(&user), 55);
 }
 
@@ -837,20 +837,20 @@ fn set_operator_and_set_treasury_are_admin_only_and_take_effect() {
     mock_auth_for(
         &s,
         &s.operator,
-        "settle_card_spend",
+        "load_card",
         (user.clone(), 40_i128, r.clone()).into_val(&s.env),
     );
     assert!(matches!(
-        s.client.try_settle_card_spend(&user, &40, &r),
+        s.client.try_load_card(&user, &40, &r),
         Err(Err(_))
     ));
     mock_auth_for(
         &s,
         &new_operator,
-        "settle_card_spend",
+        "load_card",
         (user.clone(), 40_i128, r.clone()).into_val(&s.env),
     );
-    s.client.settle_card_spend(&user, &40, &r);
+    s.client.load_card(&user, &40, &r);
     s.env.mock_all_auths();
     assert_eq!(s.token.balance(&new_treasury), 40);
     assert_eq!(s.token.balance(&s.treasury), 0);
@@ -958,12 +958,12 @@ fn balance_invariant_holds_across_mixed_sequence() {
     s.client.deposit(&bob, &(500 * USDC));
     check("bob deposit");
     s.client
-        .settle_card_spend(&alice, &(120 * USDC), &reference(&s, 1));
+        .load_card(&alice, &(120 * USDC), &reference(&s, 1));
     check("alice spend");
     s.client.withdraw(&bob, &(200 * USDC));
     check("bob withdraw");
     s.client
-        .credit_refund(&alice, &(20 * USDC), &reference(&s, 2));
+        .unload_card(&alice, &(20 * USDC), &reference(&s, 2));
     check("alice refund");
     s.client.deposit(&carol, &USDC);
     check("carol deposit");
@@ -971,11 +971,11 @@ fn balance_invariant_holds_across_mixed_sequence() {
     assert!(s.client.try_withdraw(&carol, &(2 * USDC)).is_err());
     assert!(s
         .client
-        .try_settle_card_spend(&bob, &(301 * USDC), &reference(&s, 3))
+        .try_load_card(&bob, &(301 * USDC), &reference(&s, 3))
         .is_err());
     assert!(s
         .client
-        .try_settle_card_spend(&alice, &1, &reference(&s, 1))
+        .try_load_card(&alice, &1, &reference(&s, 1))
         .is_err());
     check("rejected calls");
     s.client.pause();
@@ -983,7 +983,7 @@ fn balance_invariant_holds_across_mixed_sequence() {
     check("withdraw while paused");
     s.client.unpause();
     s.client
-        .settle_card_spend(&bob, &(300 * USDC), &reference(&s, 3));
+        .load_card(&bob, &(300 * USDC), &reference(&s, 3));
     check("bob spend");
     s.client.withdraw(&carol, &USDC);
     check("carol withdraw");
@@ -1036,16 +1036,16 @@ fn every_state_change_emits_its_event() {
         }
     );
     expect_event!(
-        s.client.settle_card_spend(&user, &20, &reference(&s, 1)),
-        events::CardSpendSettled {
+        s.client.load_card(&user, &20, &reference(&s, 1)),
+        events::CardLoaded {
             user: user.clone(),
             amount: 20,
             reference: reference(&s, 1)
         }
     );
     expect_event!(
-        s.client.credit_refund(&user, &5, &reference(&s, 2)),
-        events::RefundCredited {
+        s.client.unload_card(&user, &5, &reference(&s, 2)),
+        events::CardUnloaded {
             user: user.clone(),
             amount: 5,
             reference: reference(&s, 2)
@@ -1100,4 +1100,97 @@ fn every_state_change_emits_its_event() {
             .len(),
         0
     );
+}
+
+#[test]
+fn backwards_compatible_aliases_forward_correctly() {
+    let s = setup();
+    let user = funded_user(&s, 100);
+    s.client.deposit(&user, &100);
+    s.token_admin.mint(&s.treasury, &500);
+
+    let r_spend = reference(&s, 31);
+    let r_refund = reference(&s, 32);
+
+    // Legacy settle_card_spend calls load_card and emits CardLoaded
+    s.client.settle_card_spend(&user, &40, &r_spend);
+    assert_eq!(s.client.balance(&user), 60);
+    assert_eq!(
+        last_events(&s),
+        [events::CardLoaded {
+            user: user.clone(),
+            amount: 40,
+            reference: r_spend.clone(),
+        }
+        .to_xdr(&s.env, &s.vault)]
+    );
+
+    // Legacy credit_refund calls unload_card and emits CardUnloaded
+    s.client.credit_refund(&user, &15, &r_refund);
+    assert_eq!(s.client.balance(&user), 75);
+    assert_eq!(
+        last_events(&s),
+        [events::CardUnloaded {
+            user: user.clone(),
+            amount: 15,
+            reference: r_refund.clone(),
+        }
+        .to_xdr(&s.env, &s.vault)]
+    );
+}
+
+#[cfg(feature = "wasm-upgrade-test")]
+#[test]
+fn upgrade_preserves_balances_and_load_unload_references() {
+    const WASM: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/wasm32v1-none/release/rubbi_vault.wasm"
+    ));
+    let s = setup();
+    let user = funded_user(&s, 200);
+    s.client.deposit(&user, &200);
+    s.token_admin.mint(&s.treasury, &500);
+
+    let r_load = reference(&s, 21);
+    let r_unload = reference(&s, 22);
+
+    // Execute load and unload prior to upgrade
+    s.client.load_card(&user, &50, &r_load);
+    s.client.unload_card(&user, &20, &r_unload);
+    assert_eq!(s.client.balance(&user), 170);
+
+    let wasm_hash = s
+        .env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&s.env, WASM));
+
+    mock_auth_for(
+        &s,
+        &s.admin,
+        "upgrade",
+        (wasm_hash.clone(),).into_val(&s.env),
+    );
+    s.client.upgrade(&wasm_hash);
+
+    // Assert persistent state survived upgrade
+    s.env.mock_all_auths();
+    assert_eq!(s.client.balance(&user), 170);
+
+    // Assert pre-upgrade references are recognized as duplicates
+    assert_eq!(
+        s.client.try_load_card(&user, &10, &r_load),
+        Err(Ok(Error::DuplicateReference))
+    );
+    assert_eq!(
+        s.client.try_unload_card(&user, &10, &r_unload),
+        Err(Ok(Error::DuplicateReference))
+    );
+
+    // Assert fresh references succeed on upgraded contract
+    let r_fresh_load = reference(&s, 23);
+    let r_fresh_unload = reference(&s, 24);
+    s.client.load_card(&user, &30, &r_fresh_load);
+    assert_eq!(s.client.balance(&user), 140);
+    s.client.unload_card(&user, &10, &r_fresh_unload);
+    assert_eq!(s.client.balance(&user), 150);
 }

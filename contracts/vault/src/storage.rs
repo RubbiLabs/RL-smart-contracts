@@ -35,9 +35,9 @@ pub enum DataKey {
     Admin,
     /// Proposed admin awaiting `accept_admin` (instance).
     PendingAdmin,
-    /// Backend operator allowed to settle card spends (instance).
+    /// Backend operator allowed to load cards (instance).
     Operator,
-    /// Treasury that receives settlements and funds refunds (instance).
+    /// Treasury that receives card load settlements and funds unloads (instance).
     Treasury,
     /// USDC Stellar Asset Contract address (instance).
     Token,
@@ -47,9 +47,21 @@ pub enum DataKey {
     TotalBalances,
     /// A user's vault balance (persistent).
     Balance(Address),
-    /// A consumed card-spend reference (persistent).
+    /// A consumed card-load reference (persistent).
+    ///
+    /// NOTE: Variant name `SpendRef` is intentionally preserved because Soroban
+    /// encodes enum variants on-chain by their symbol name (`"SpendRef"`).
+    /// Renaming the variant would invalidate persistent references stored before
+    /// upgrade. Functions and events are renamed to load/unload while keeping
+    /// storage wire compatibility.
     SpendRef(BytesN<32>),
-    /// A consumed refund reference (persistent).
+    /// A consumed card-unload reference (persistent).
+    ///
+    /// NOTE: Variant name `RefundRef` is intentionally preserved because Soroban
+    /// encodes enum variants on-chain by their symbol name (`"RefundRef"`).
+    /// Renaming the variant would invalidate persistent references stored before
+    /// upgrade. Functions and events are renamed to load/unload while keeping
+    /// storage wire compatibility.
     RefundRef(BytesN<32>),
 }
 
@@ -172,22 +184,44 @@ pub fn set_balance(env: &Env, user: &Address, balance: i128) {
 
 // ---- persistent: reference namespaces --------------------------------------
 
-/// Whether a card-spend reference has already been settled.
-pub fn has_spend_ref(env: &Env, reference: &BytesN<32>) -> bool {
+/// Whether a card-load reference has already been settled.
+pub fn has_load_ref(env: &Env, reference: &BytesN<32>) -> bool {
     has_ref(env, &DataKey::SpendRef(reference.clone()))
 }
 
-pub fn set_spend_ref(env: &Env, reference: &BytesN<32>) {
+/// Mark a card-load reference as settled.
+pub fn set_load_ref(env: &Env, reference: &BytesN<32>) {
     set_ref(env, &DataKey::SpendRef(reference.clone()));
 }
 
-/// Whether a refund reference has already been credited.
-pub fn has_refund_ref(env: &Env, reference: &BytesN<32>) -> bool {
+/// Whether a card-unload reference has already been credited.
+pub fn has_unload_ref(env: &Env, reference: &BytesN<32>) -> bool {
     has_ref(env, &DataKey::RefundRef(reference.clone()))
 }
 
-pub fn set_refund_ref(env: &Env, reference: &BytesN<32>) {
+/// Mark a card-unload reference as credited.
+pub fn set_unload_ref(env: &Env, reference: &BytesN<32>) {
     set_ref(env, &DataKey::RefundRef(reference.clone()));
+}
+
+/// Deprecated alias for [`has_load_ref`].
+pub fn has_spend_ref(env: &Env, reference: &BytesN<32>) -> bool {
+    has_load_ref(env, reference)
+}
+
+/// Deprecated alias for [`set_load_ref`].
+pub fn set_spend_ref(env: &Env, reference: &BytesN<32>) {
+    set_load_ref(env, reference);
+}
+
+/// Deprecated alias for [`has_unload_ref`].
+pub fn has_refund_ref(env: &Env, reference: &BytesN<32>) -> bool {
+    has_unload_ref(env, reference)
+}
+
+/// Deprecated alias for [`set_unload_ref`].
+pub fn set_refund_ref(env: &Env, reference: &BytesN<32>) {
+    set_unload_ref(env, reference);
 }
 
 fn has_ref(env: &Env, key: &DataKey) -> bool {

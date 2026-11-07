@@ -82,7 +82,7 @@ flowchart LR
 
   subgraph Backend["Rubbi backend (RL-api)"]
     KEEPER[keeper key<br/>charge_batch / disburse_batch]
-    OPERATOR[operator / treasury keys<br/>settle_card_spend = load card<br/>credit_refund = unload card]
+    OPERATOR[operator / treasury keys<br/>load_card = load card<br/>unload_card = unload card]
     INDEXER[event indexer<br/>getEvents, cursor-based]
     CARD[card issuer adapter]
   end
@@ -211,15 +211,15 @@ the deploying commit are also under [Deployment details](#deployment-details).
 
 Custody for card funding: the user's Rubbi wallet. Users deposit USDC and
 withdraw it at any time. Loading the card moves USDC from the user's vault
-balance to the treasury (`settle_card_spend`, operator); unloading moves it
-back (`credit_refund`, treasury). `__constructor(admin, operator, treasury, token)`.
+balance to the treasury (`load_card`, operator); unloading moves it
+back (`unload_card`, treasury). `__constructor(admin, operator, treasury, token)`.
 
 | Function | Auth | Errors | Events |
 |---|---|---|---|
 | `deposit(user, amount)` | `user` | `InvalidAmount`, `Paused`, `Overflow` | `deposit` |
 | `withdraw(user, amount)` — allowed while paused | `user` | `InvalidAmount`, `InsufficientBalance` | `withdraw` |
-| `settle_card_spend(user, amount, reference: BytesN<32>)` — move USDC from the user's vault to the treasury when the card is loaded; `reference` is unique | operator | `InvalidAmount`, `Paused`, `DuplicateReference`, `InsufficientBalance`, `Overflow` | `card_spend_settled` |
-| `credit_refund(user, amount, reference: BytesN<32>)` — move USDC back from the treasury into the user's vault when the card is unloaded; own reference namespace; allowed while paused | treasury | `InvalidAmount`, `DuplicateReference`, `Overflow` | `refund_credited` |
+| `load_card(user, amount, reference: BytesN<32>)` — move USDC from the user's vault to the treasury when the card is loaded; `reference` is unique | operator | `InvalidAmount`, `Paused`, `DuplicateReference`, `InsufficientBalance`, `Overflow` | `card_loaded` |
+| `unload_card(user, amount, reference: BytesN<32>)` — move USDC back from the treasury into the user's vault when the card is unloaded; own reference namespace; allowed while paused | treasury | `InvalidAmount`, `DuplicateReference`, `Overflow` | `card_unloaded` |
 | `set_operator(new_operator)` | admin | — | `operator_set` |
 | `set_treasury(new_treasury)` | admin | — | `treasury_set` |
 | `propose_admin(new_admin)` | admin | — | `admin_proposed` |
@@ -384,14 +384,14 @@ another's.
 | Role | Holds | Can |
 |---|---|---|
 | admin | Rubbi (multisig recommended) | rotate operator / treasury, set fees (hard cap 10%) and fee recipient, allowlist merchants, pause / unpause, upgrade, hand over admin with a two-step transfer |
-| operator | Rubbi backend (hot key) | `settle_card_spend` only |
-| treasury | Rubbi | receives card loads; signs `credit_refund` for unloads |
+| operator | Rubbi backend (hot key) | `load_card` only |
+| treasury | Rubbi | receives card loads; signs `unload_card` for unloads |
 | keeper | Rubbi backend (hot key) | nothing special: `charge_batch` and `disburse_batch` are permissionless and time-gated, the keeper just pays the fees |
 | fee recipient | Rubbi | receives the fee share of every charge and disbursement; no powers |
 
 **Custodial card loads.** The vault is custodial for card funding: the
 operator key can move *any* user's vault balance to the treasury via
-`settle_card_spend`, the on-chain half of loading the card. Users trust
+`load_card`, the on-chain half of loading the card. Users trust
 Rubbi's backend to call it only for loads they requested. Idempotent
 references and events make every load auditable, but they do not stop a
 compromised operator from draining vault balances up to each user's balance.

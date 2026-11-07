@@ -31,8 +31,8 @@ values, per-function errors and behaviour are in the README's
 |---|---|
 | `deposit(user, amount)` | `user` |
 | `withdraw(user, amount)` | `user` |
-| `settle_card_spend(user, amount, reference)` | the stored operator |
-| `credit_refund(user, amount, reference)` | the stored treasury |
+| `load_card(user, amount, reference)` | the stored operator |
+| `unload_card(user, amount, reference)` | the stored treasury |
 | `set_operator(new_operator)`, `set_treasury(new_treasury)` | admin |
 | `propose_admin(new_admin)` | admin |
 | `accept_admin()` | the pending admin |
@@ -40,7 +40,7 @@ values, per-function errors and behaviour are in the README's
 | `upgrade(new_wasm_hash)` | admin |
 | `balance(user)`, `total_balances()`, `admin()`, `pending_admin()`, `operator()`, `treasury()`, `token()`, `is_paused()` | nobody (read-only) |
 
-The user does not sign `settle_card_spend` or `credit_refund`: the backend
+The user does not sign `load_card` or `unload_card`: the backend
 signs them with the operator key (card load) or the treasury key (card
 unload) after the user asks the app to load or unload the card.
 `reference` is a `BytesN<32>` (64 hex characters on the CLI) and can be used
@@ -103,8 +103,8 @@ movements themselves also appear as the USDC SAC's `transfer` events.
 |---|---|---|
 | `deposit` | `user: Address` | `amount: i128` |
 | `withdraw` | `user: Address` | `amount: i128` |
-| `card_spend_settled` | `user: Address` | `amount: i128`, `reference: BytesN<32>` |
-| `refund_credited` | `user: Address` | `amount: i128`, `reference: BytesN<32>` |
+| `card_loaded` | `user: Address` | `amount: i128`, `reference: BytesN<32>` |
+| `card_unloaded` | `user: Address` | `amount: i128`, `reference: BytesN<32>` |
 | `operator_set` | — | `operator: Address` |
 | `treasury_set` | — | `treasury: Address` |
 | `admin_proposed` | `pending_admin: Address` | — |

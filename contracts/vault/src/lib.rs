@@ -7,8 +7,8 @@
 //!
 //! Roles (set in the constructor, rotatable by the admin):
 //! - `admin`: configuration, pause, upgrade, role rotation (two-step transfer)
-//! - `operator`: settles card spends (`settle_card_spend`)
-//! - `treasury`: receives settlements and funds refunds (`credit_refund`)
+//! - `operator`: loads card balances from vault balances (`load_card`)
+//! - `treasury`: receives card load settlements and funds unloads (`unload_card`)
 //!
 //! Users can always withdraw their own balance, even while the vault is
 //! paused. Pause only blocks deposits and settlements.
@@ -106,17 +106,17 @@ impl VaultContract {
         Ok(())
     }
 
-    // ---- card settlement ---------------------------------------------------
+    // ---- card movement (load / unload) -------------------------------------
 
-    /// Settle an off-chain card spend: move `amount` of `user`'s balance to
-    /// the treasury. `reference` (e.g. the hash of the issuer's transaction
-    /// id) makes the call idempotent: a reference can only be settled once.
+    /// Load card from vault: move `amount` of `user`'s balance to the treasury
+    /// to back card spend. `reference` (e.g. the hash of the issuer's transaction
+    /// id) makes the call idempotent: a reference can only be loaded once.
     ///
     /// Auth: the stored operator.
     /// Errors: `InvalidAmount` (amount <= 0), `Paused`, `DuplicateReference`,
     /// `InsufficientBalance`, `Overflow`.
-    /// Events: `card_spend_settled`.
-    pub fn settle_card_spend(
+    /// Events: `card_loaded`.
+    pub fn load_card(
         env: Env,
         user: Address,
         amount: i128,
@@ -125,13 +125,13 @@ impl VaultContract {
         storage::get_operator(&env).require_auth();
         require_positive(amount)?;
         require_not_paused(&env)?;
-        if storage::has_spend_ref(&env, &reference) {
+        if storage::has_load_ref(&env, &reference) {
             return Err(Error::DuplicateReference);
         }
         storage::extend_instance(&env);
 
         debit(&env, &user, amount)?;
-        storage::set_spend_ref(&env, &reference);
+        storage::set_load_ref(&env, &reference);
 
         token::TokenClient::new(&env, &storage::get_token(&env)).transfer(
             &env.current_contract_address(),
@@ -139,7 +139,7 @@ impl VaultContract {
             &amount,
         );
 
-        events::CardSpendSettled {
+        events::CardLoaded {
             user,
             amount,
             reference,
@@ -148,15 +148,15 @@ impl VaultContract {
         Ok(())
     }
 
-    /// Credit a refund: pull `amount` from the treasury into the vault and
-    /// add it to `user`'s balance. `reference` is unique within refunds
-    /// (a separate namespace from spend references). Allowed while paused.
+    /// Unload card back to vault: pull `amount` from the treasury into the vault and
+    /// add it to `user`'s balance. `reference` is unique within unloads
+    /// (a separate namespace from load references). Allowed while paused.
     ///
     /// Auth: the stored treasury.
     /// Errors: `InvalidAmount` (amount <= 0), `DuplicateReference`,
     /// `Overflow`.
-    /// Events: `refund_credited`.
-    pub fn credit_refund(
+    /// Events: `card_unloaded`.
+    pub fn unload_card(
         env: Env,
         user: Address,
         amount: i128,
@@ -165,13 +165,13 @@ impl VaultContract {
         let treasury = storage::get_treasury(&env);
         treasury.require_auth();
         require_positive(amount)?;
-        if storage::has_refund_ref(&env, &reference) {
+        if storage::has_unload_ref(&env, &reference) {
             return Err(Error::DuplicateReference);
         }
         storage::extend_instance(&env);
 
         credit(&env, &user, amount)?;
-        storage::set_refund_ref(&env, &reference);
+        storage::set_unload_ref(&env, &reference);
 
         token::TokenClient::new(&env, &storage::get_token(&env)).transfer(
             &treasury,
@@ -179,13 +179,33 @@ impl VaultContract {
             &amount,
         );
 
-        events::RefundCredited {
+        events::CardUnloaded {
             user,
             amount,
             reference,
         }
         .publish(&env);
         Ok(())
+    }
+
+    /// Backwards-compatible alias for [`load_card`].
+    pub fn settle_card_spend(
+        env: Env,
+        user: Address,
+        amount: i128,
+        reference: BytesN<32>,
+    ) -> Result<(), Error> {
+        Self::load_card(env, user, amount, reference)
+    }
+
+    /// Backwards-compatible alias for [`unload_card`].
+    pub fn credit_refund(
+        env: Env,
+        user: Address,
+        amount: i128,
+        reference: BytesN<32>,
+    ) -> Result<(), Error> {
+        Self::unload_card(env, user, amount, reference)
     }
 
     // ---- admin: roles ------------------------------------------------------

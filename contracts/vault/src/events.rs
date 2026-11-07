@@ -24,27 +24,33 @@ pub struct Withdraw {
     pub amount: i128,
 }
 
-/// `card_spend_settled`: the operator moved `amount` of `user`'s balance to
-/// the treasury for the card spend identified by `reference`.
+/// `card_loaded`: the operator moved `amount` of `user`'s balance to
+/// the treasury for the card load identified by `reference`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CardSpendSettled {
+pub struct CardLoaded {
     #[topic]
     pub user: Address,
     pub amount: i128,
     pub reference: BytesN<32>,
 }
 
-/// `refund_credited`: the treasury credited `amount` back to `user` for the
-/// refund identified by `reference`.
+/// `card_unloaded`: the treasury credited `amount` back to `user` for the
+/// card unload identified by `reference`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundCredited {
+pub struct CardUnloaded {
     #[topic]
     pub user: Address,
     pub amount: i128,
     pub reference: BytesN<32>,
 }
+
+/// Deprecated type alias for historical event decoders.
+pub type CardSpendSettled = CardLoaded;
+
+/// Deprecated type alias for historical event decoders.
+pub type RefundCredited = CardUnloaded;
 
 /// `operator_set`: the admin rotated the operator role.
 #[contractevent]

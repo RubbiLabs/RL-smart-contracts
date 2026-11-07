@@ -91,8 +91,8 @@ window, each decoded to its contract and function) and backfilled into
 |---|---|---|---|---|
 | 1 | vault | `deposit` (5 USDC) | demo-user | [`b06b879b…`](https://stellar.expert/explorer/testnet/tx/b06b879b89492bcef6264891508945ca359f46b47854df73b58f4cabada2659a) |
 | 2 | vault | `withdraw` (1 USDC) | demo-user | [`7b9c2f0a…`](https://stellar.expert/explorer/testnet/tx/7b9c2f0aabbf6fb5129b424556b883863b592dabde97e42d13bb5cf2847b120d) |
-| 3 | vault | `settle_card_spend` (2 USDC card load) | operator | [`2e449413…`](https://stellar.expert/explorer/testnet/tx/2e449413432723ced5903c16105ab8315b2d6e115fd041de5a8676410d538ba2) |
-| 4 | vault | `credit_refund` (1 USDC card unload) | treasury | [`7de7066a…`](https://stellar.expert/explorer/testnet/tx/7de7066a8030ec778456f5853238fca87f425585d88df3429089d1de1298b336) |
+| 3 | vault | `load_card` (2 USDC card load) | operator | [`2e449413…`](https://stellar.expert/explorer/testnet/tx/2e449413432723ced5903c16105ab8315b2d6e115fd041de5a8676410d538ba2) |
+| 4 | vault | `unload_card` (1 USDC card unload) | treasury | [`7de7066a…`](https://stellar.expert/explorer/testnet/tx/7de7066a8030ec778456f5853238fca87f425585d88df3429089d1de1298b336) |
 | 5 | subscriptions | `add_merchant` | admin | [`9edb23fe…`](https://stellar.expert/explorer/testnet/tx/9edb23fe9bca8e580ad6bc076344c78f21a5c050032753d1c802bf7025945073) |
 | 6 | subscriptions | `create_plan` (plan 1, 1 USDC / day) | demo-merchant | [`31c3ba16…`](https://stellar.expert/explorer/testnet/tx/31c3ba1687e0a765f6a332db27595eff09a46127580d6c613199c02daa6cc59e) |
 | 7 | USDC SAC | `approve` (spender = subscriptions) | demo-user | [`da3d69c7…`](https://stellar.expert/explorer/testnet/tx/da3d69c7fb8c3e566a746549de65563b09b9ebc34ab6c74cafb6f97781b0df85) |
