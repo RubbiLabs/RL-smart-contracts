@@ -232,3 +232,23 @@ pub fn remove_sub_id_of(env: &Env, subscriber: &Address, plan_id: u32) {
         .persistent()
         .remove(&DataKey::SubOf(subscriber.clone(), plan_id));
 }
+
+// ---- persistent: pending price ----------------------------------------------
+
+/// Get the pending proposed price for a plan, if any.
+pub fn get_pending_price(env: &Env, plan_id: u32) -> Option<i128> {
+    let key = DataKey::PendingPrice(plan_id);
+    if env.storage().persistent().has(&key) {
+        extend_persistent(env, &key);
+        Some(env.storage().persistent().get(&key).unwrap())
+    } else {
+        None
+    }
+}
+
+/// Store a pending proposed price for a plan.
+pub fn set_pending_price(env: &Env, plan_id: u32, amount: i128) {
+    let key = DataKey::PendingPrice(plan_id);
+    env.storage().persistent().set(&key, &amount);
+    extend_persistent(env, &key);
+}

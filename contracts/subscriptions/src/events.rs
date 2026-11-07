@@ -181,3 +181,25 @@ pub struct Unpaused {}
 pub struct Upgraded {
     pub wasm_hash: BytesN<32>,
 }
+
+/// `plan_price_proposed`: the merchant proposed a new price for `plan_id`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanPriceProposed {
+    #[topic]
+    pub plan_id: u32,
+    #[topic]
+    pub merchant: Address,
+    pub new_amount: i128,
+}
+
+/// `price_accepted`: the subscriber accepted the new plan price for `sub_id`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceAccepted {
+    #[topic]
+    pub sub_id: u64,
+    #[topic]
+    pub subscriber: Address,
+    pub new_amount: i128,
+}

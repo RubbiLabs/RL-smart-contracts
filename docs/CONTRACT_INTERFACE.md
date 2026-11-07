@@ -121,6 +121,8 @@ movements themselves also appear as the USDC SAC's `transfer` events.
 | `plan_created` | `merchant: Address` | `plan_id: u32`, `name: String`, `amount: i128`, `period: u64` |
 | `plan_active_set` | `merchant: Address` | `plan_id: u32`, `active: bool` |
 | `subscribed` | `subscriber: Address` | `sub_id: u64`, `plan_id: u32`, `next_due: u64` |
+| `plan_price_proposed` | `plan_id: u32`, `merchant: Address` | `new_amount: i128` |
+| `price_accepted` | `sub_id: u64`, `subscriber: Address` | `new_amount: i128` |
 | `charged` | `subscriber: Address` | `sub_id: u64`, `plan_id: u32`, `merchant: Address`, `amount: i128`, `fee: i128`, `next_due: u64` |
 | `charge_failed` | `subscriber: Address` | `sub_id: u64`, `plan_id: u32`, `amount: i128` |
 | `charge_skipped` | `subscriber: Address` | `sub_id: u64`, `reason: Symbol` (`merchant_inactive` or `payout_unavailable`) |

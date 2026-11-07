@@ -244,7 +244,7 @@ contract spec):
 pub struct Merchant { pub payout: Address, pub active: bool }
 pub struct Plan { pub id: u32, pub merchant: Address, pub name: String /* ≤ 64 bytes */, pub amount: i128, pub period: u64, pub active: bool }
 pub enum SubStatus { Active, Paused, PastDue, Cancelled }
-pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32, pub next_due: u64, pub status: SubStatus, pub created_at: u64 }
+pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32, pub amount: i128, pub next_due: u64, pub status: SubStatus, pub created_at: u64 }
 ```
 
 | Function | Auth | Errors | Events |
@@ -253,6 +253,8 @@ pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32
 | `set_merchant_active(merchant, active)` — inactive merchants cannot create plans or take subscribers; their subscriptions are skipped by `charge` | admin | `MerchantNotFound` | `merchant_active_set` |
 | `create_plan(merchant, name, amount, period) -> u32` | `merchant` (active) | `MerchantNotFound`, `MerchantInactive`, `NameTooLong`, `InvalidAmount`, `InvalidPeriod` | `plan_created` |
 | `set_plan_active(merchant, plan_id, active)` — deactivated plans take no new subscribers; existing ones keep running | `merchant` (plan owner) | `PlanNotFound`, `NotPlanOwner` | `plan_active_set` |
+| `propose_plan_price(merchant, plan_id, new_amount)` — propose a new price; new subscribers pay `new_amount`, existing subscribers continue at their agreed price until explicit consent | `merchant` (plan owner) | `Paused`, `PlanNotFound`, `NotPlanOwner`, `InvalidAmount` | `plan_price_proposed` |
+| `accept_plan_price(subscriber, sub_id)` — explicitly accept the plan's new price for an existing subscription | `subscriber` | `Paused`, `SubscriptionNotFound`, `NotSubscriber`, `AlreadyCancelled`, `PlanNotFound` | `price_accepted` |
 | `subscribe(subscriber, plan_id) -> u64` — pulls the first period immediately; nothing is written if the pull fails or the payout address cannot receive USDC | `subscriber` | `Paused`, `PlanNotFound`, `PlanInactive`, `MerchantNotFound`, `MerchantInactive`, `AlreadySubscribed`, `PayoutUnavailable`, `PaymentFailed`, `Overflow` | `subscribed`, `charged` |
 | `charge(sub_id) -> bool` — one period if due; `false` + `PastDue` on a failed pull; `false` + nothing written (no pull, allowance untouched) for an inactive merchant or a payout address that cannot receive USDC | none | `Paused`, `SubscriptionNotFound`, `NotChargeable`, `NotDue`, `PlanNotFound`, `MerchantNotFound`, `Overflow` | `charged`, `charge_failed` or `charge_skipped` |
 | `charge_batch(sub_ids) -> Vec<bool>` — per-item problems yield `false`, never fail the batch; one unpayable merchant never blocks the others | none | `BatchTooLarge`, `Paused` | as `charge`, per item |
@@ -264,7 +266,7 @@ pub struct Subscription { pub id: u64, pub subscriber: Address, pub plan_id: u32
 | `propose_admin(new_admin)` / `accept_admin()` | admin / pending admin | — / `NoPendingAdmin` | `admin_proposed` / `admin_transferred` |
 | `pause()` / `unpause()` — pause blocks `subscribe`, `charge`, `charge_batch` | admin | — | `paused` / `unpaused` |
 | `upgrade(new_wasm_hash)` | admin | — | `upgraded` |
-| `get_merchant(merchant) -> Option<Merchant>`, `get_plan(plan_id)`, `get_subscription(sub_id)`, `sub_id_of(subscriber, plan_id) -> Option<u64>`, `admin()`, `pending_admin()`, `token()`, `fee_recipient()`, `fee_bps()`, `is_paused()` | none | `PlanNotFound` / `SubscriptionNotFound` for the two `get_*` by id | — |
+| `get_merchant(merchant) -> Option<Merchant>`, `get_plan(plan_id)`, `get_subscription(sub_id)`, `pending_plan_price(plan_id) -> Option<i128>`, `sub_id_of(subscriber, plan_id) -> Option<u64>`, `admin()`, `pending_admin()`, `token()`, `fee_recipient()`, `fee_bps()`, `is_paused()` | none | `PlanNotFound` / `SubscriptionNotFound` for the two `get_*` by id | — |
 
 State machine: pause from `Active` or `PastDue`; resume only from `Paused`;
 cancel from anything but `Cancelled`. Ids start at 1; rejected calls never

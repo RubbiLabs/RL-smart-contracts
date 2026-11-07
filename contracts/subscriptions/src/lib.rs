@@ -95,6 +95,8 @@ pub struct Subscription {
     pub id: u64,
     pub subscriber: Address,
     pub plan_id: u32,
+    /// Price per period agreed by the subscriber at subscribe time or re-consent.
+    pub amount: i128,
     /// Ledger timestamp (seconds) from which the next charge is allowed.
     pub next_due: u64,
     pub status: SubStatus,
@@ -467,6 +469,88 @@ impl SubscriptionsContract {
             results.push_back(charge_one(&env, sub_id).unwrap_or(false));
         }
         Ok(results)
+    }
+
+
+    /// Proposed new price awaiting subscriber acceptance, if any. Auth: none.
+    pub fn pending_plan_price(env: Env, plan_id: u32) -> Option<i128> {
+        storage::get_pending_price(&env, plan_id)
+    }
+
+    /// Propose a new price for a plan.
+    ///
+    /// New subscribers paying after this call will pay `new_amount`.
+    /// Existing subscribers continue paying their previously agreed `Subscription.amount`
+    /// until they explicitly consent via [`accept_plan_price`].
+    ///
+    /// Auth: plan owner (merchant).
+    /// Errors: `Paused`, `PlanNotFound`, `NotPlanOwner`, `InvalidAmount`.
+    /// Events: `plan_price_proposed`.
+    pub fn propose_plan_price(
+        env: Env,
+        merchant: Address,
+        plan_id: u32,
+        new_amount: i128,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        require_positive(new_amount)?;
+        merchant.require_auth();
+        storage::extend_instance(&env);
+
+        let mut plan = storage::get_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
+        if plan.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+
+        plan.amount = new_amount;
+        storage::set_plan(&env, &plan);
+        storage::set_pending_price(&env, plan_id, new_amount);
+
+        events::PlanPriceProposed {
+            plan_id,
+            merchant,
+            new_amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Explicitly accept the plan's current price for an existing subscription.
+    ///
+    /// Updates `Subscription.amount` to `Plan.amount`. Subsequent charges
+    /// will pull the new price.
+    ///
+    /// Auth: subscriber.
+    /// Errors: `Paused`, `SubscriptionNotFound`, `NotSubscriber`, `AlreadyCancelled`, `PlanNotFound`.
+    /// Events: `price_accepted`.
+    pub fn accept_plan_price(
+        env: Env,
+        subscriber: Address,
+        sub_id: u64,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        subscriber.require_auth();
+        storage::extend_instance(&env);
+
+        let mut sub = storage::get_subscription(&env, sub_id).ok_or(Error::SubscriptionNotFound)?;
+        if sub.subscriber != subscriber {
+            return Err(Error::NotSubscriber);
+        }
+        if sub.status == SubStatus::Cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+
+        let plan = storage::get_plan(&env, sub.plan_id).ok_or(Error::PlanNotFound)?;
+        sub.amount = plan.amount;
+        storage::set_subscription(&env, &sub);
+
+        events::PriceAccepted {
+            sub_id,
+            subscriber,
+            new_amount: plan.amount,
+        }
+        .publish(&env);
+        Ok(())
     }
 
     // ---- admin: fees -------------------------------------------------------
