@@ -416,12 +416,12 @@ if [ "$DAY2" -eq 0 ]; then
   SPEND_REFERENCE="$(sha256_hex "rubbi-demo-$RUN_ID-card-load")"
   log "vault: rubbi-operator settles a $((SPEND_AMOUNT / ONE_USDC)) USDC card load for demo-user (reference $SPEND_REFERENCE)"
   must_invoke vault-settle-card-spend "" "$OPERATOR_ID" "$VAULT_ID" \
-    settle_card_spend --user "$USER_PK" --amount "$SPEND_AMOUNT" --reference "$SPEND_REFERENCE"
+    load_card --user "$USER_PK" --amount "$SPEND_AMOUNT" --reference "$SPEND_REFERENCE"
 
   REFUND_REFERENCE="$(sha256_hex "rubbi-demo-$RUN_ID-card-unload")"
   log "vault: rubbi-treasury refunds $((REFUND_AMOUNT / ONE_USDC)) USDC to demo-user (reference $REFUND_REFERENCE)"
   must_invoke vault-credit-refund "" "$TREASURY_ID" "$VAULT_ID" \
-    credit_refund --user "$USER_PK" --amount "$REFUND_AMOUNT" --reference "$REFUND_REFERENCE"
+    unload_card --user "$USER_PK" --amount "$REFUND_AMOUNT" --reference "$REFUND_REFERENCE"
 
   # ------------------------------------------------------ 5. subscriptions --
   log "subscriptions: merchant allowlist"
