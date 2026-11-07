@@ -786,6 +786,7 @@ fn subscribe_charges_first_period_and_sets_next_due() {
             id: sub_id,
             subscriber: user.clone(),
             plan_id,
+            amount: 100 * USDC,
             next_due: START + MONTH,
             status: SubStatus::Active,
             created_at: START,
@@ -2027,6 +2028,7 @@ fn on_chain_types_have_no_pii_fields() {
     assert_eq!(
         field_names(&Subscription::spec_xdr()),
         [
+            "amount",
             "created_at",
             "id",
             "next_due",
@@ -2073,11 +2075,12 @@ fn on_chain_types_have_no_pii_fields() {
         id,
         subscriber,
         plan_id,
+        amount,
         next_due,
         status,
         created_at,
     } = s.client.get_subscription(&sub_id);
-    let _ = (id, subscriber, plan_id, next_due, status, created_at);
+    let _ = (id, subscriber, plan_id, amount, next_due, status, created_at);
 }
 
 // ---- upgrade -------------------------------------------------------------------------
@@ -2130,4 +2133,116 @@ fn upgrade_by_admin_replaces_the_executable() {
     advance(&s, MONTH);
     assert!(s.client.charge(&sub_id));
     assert_eq!(s.token.balance(&user), 98 * USDC);
+}
+
+// ---- Plan Price Change & Subscriber Explicit Re-consent tests (#14) ---------
+
+#[test]
+fn existing_subscriber_keeps_old_price_until_explicit_acceptance() {
+    let s = setup();
+    let (merchant, payout, plan_id) = merchant_with_plan(&s, 100 * USDC);
+
+    // Alice subscribes at initial 100 USDC price
+    let alice = subscriber(&s, 1_000 * USDC);
+    let alice_sub = s.client.subscribe(&alice, &plan_id);
+    assert_eq!(s.client.get_subscription(&alice_sub).amount, 100 * USDC);
+    assert_eq!(s.token.balance(&payout), 98 * USDC); // 100 - 2% fee
+
+    // Merchant proposes a price increase to 150 USDC
+    mock_auth_for(
+        &s,
+        &merchant,
+        "propose_plan_price",
+        (merchant.clone(), plan_id, 150_i128 * USDC).into_val(&s.env),
+    );
+    s.client.propose_plan_price(&merchant, &plan_id, &(150 * USDC));
+
+    // Current plan price is 150 USDC, but Alice's agreed price remains 100 USDC
+    assert_eq!(s.client.get_plan(&plan_id).amount, 150 * USDC);
+    assert_eq!(s.client.pending_plan_price(&plan_id), Some(150 * USDC));
+    assert_eq!(s.client.get_subscription(&alice_sub).amount, 100 * USDC);
+
+    // Advance time past next_due and charge Alice
+    s.env.ledger().with_mut(|li| li.timestamp = START + MONTH);
+    let charged = s.client.charge(&alice_sub);
+    assert!(charged);
+
+    // Alice was charged the OLD price (100 USDC), not 150 USDC
+    assert_eq!(s.token.balance(&alice), 800 * USDC); // 1000 - 100 - 100
+    assert_eq!(s.token.balance(&payout), 196 * USDC); // 98 + 98
+
+    // New subscriber Bob subscribes after the price change
+    let bob = subscriber(&s, 1_000 * USDC);
+    let bob_sub = s.client.subscribe(&bob, &plan_id);
+    // Bob pays the NEW price (150 USDC)
+    assert_eq!(s.client.get_subscription(&bob_sub).amount, 150 * USDC);
+    assert_eq!(s.token.balance(&bob), 850 * USDC); // 1000 - 150
+    assert_eq!(s.token.balance(&payout), 196 * USDC + 147 * USDC); // + 150 - 2% (3)
+
+    // Alice now explicitly accepts the new price
+    mock_auth_for(
+        &s,
+        &alice,
+        "accept_plan_price",
+        (alice.clone(), alice_sub).into_val(&s.env),
+    );
+    s.client.accept_plan_price(&alice, &alice_sub);
+    assert_eq!(s.client.get_subscription(&alice_sub).amount, 150 * USDC);
+
+    // Next period: Alice is now charged the new price (150 USDC)
+    s.env.ledger().with_mut(|li| li.timestamp = START + 2 * MONTH);
+    let charged_alice_2 = s.client.charge(&alice_sub);
+    assert!(charged_alice_2);
+    assert_eq!(s.token.balance(&alice), 650 * USDC); // 800 - 150
+}
+
+#[test]
+fn propose_and_accept_price_auth_and_validations() {
+    let s = setup();
+    let (merchant, _payout, plan_id) = merchant_with_plan(&s, 100 * USDC);
+    let alice = subscriber(&s, 500 * USDC);
+    let sub_id = s.client.subscribe(&alice, &plan_id);
+    let stranger = Address::generate(&s.env);
+
+    // Non-merchant cannot propose price
+    mock_auth_for(
+        &s,
+        &stranger,
+        "propose_plan_price",
+        (stranger.clone(), plan_id, 120_i128 * USDC).into_val(&s.env),
+    );
+    assert!(is_host_error(&s.client.try_propose_plan_price(&stranger, &plan_id, &(120 * USDC))));
+
+    // Invalid amount (0 or negative) rejected
+    mock_auth_for(
+        &s,
+        &merchant,
+        "propose_plan_price",
+        (merchant.clone(), plan_id, 0_i128).into_val(&s.env),
+    );
+    assert_eq!(
+        s.client.try_propose_plan_price(&merchant, &plan_id, &0),
+        Err(Ok(Error::InvalidAmount))
+    );
+
+    // Non-subscriber cannot accept price
+    mock_auth_for(
+        &s,
+        &stranger,
+        "accept_plan_price",
+        (stranger.clone(), sub_id).into_val(&s.env),
+    );
+    assert!(is_host_error(&s.client.try_accept_plan_price(&stranger, &sub_id)));
+
+    // Unknown subscription rejected
+    mock_auth_for(
+        &s,
+        &alice,
+        "accept_plan_price",
+        (alice.clone(), 999_u64).into_val(&s.env),
+    );
+    assert_eq!(
+        s.client.try_accept_plan_price(&alice, &999),
+        Err(Ok(Error::SubscriptionNotFound))
+    );
 }
