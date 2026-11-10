@@ -94,7 +94,9 @@ pub struct ChargeFailed {
 /// `PastDue`, `next_due` unchanged). `reason` is one of:
 /// - `merchant_inactive`: the admin deactivated the plan's merchant;
 /// - `payout_unavailable`: the merchant's payout address cannot receive
-///   USDC right now (no trustline, or a frozen one).
+///   USDC right now (no trustline, or a frozen one);
+/// - `payout_failed`: the merchant payout transfer failed (e.g. trustline
+///   limit exceeded) and the pulled amount was refunded to the subscriber.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChargeSkipped {

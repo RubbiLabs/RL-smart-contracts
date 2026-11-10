@@ -115,6 +115,7 @@ pub enum MockKey {
     Balance(Address),
     Allowance(Address, Address),
     Unpayable,
+    RejectTransfer(Address),
 }
 
 #[contract]
@@ -126,6 +127,12 @@ impl MockToken {
     /// everyone payable again.
     pub fn set_unpayable(env: Env, addr: Address) {
         env.storage().instance().set(&MockKey::Unpayable, &addr);
+    }
+
+    /// Make `addr` reject incoming transfers (simulating e.g. trustline limit
+    /// exceeded where authorized is true, but transfer fails).
+    pub fn set_reject_transfer(env: Env, addr: Address) {
+        env.storage().instance().set(&MockKey::RejectTransfer(addr), &true);
     }
 
     pub fn mint(env: Env, to: Address, amount: i128) {
@@ -198,6 +205,14 @@ fn set_balance(env: &Env, addr: &Address, amount: i128) {
 
 fn move_tokens(env: &Env, from: &Address, to: &Address, amount: i128) {
     require_payable(env, to);
+    if env
+        .storage()
+        .instance()
+        .get::<_, bool>(&MockKey::RejectTransfer(to.clone()))
+        .unwrap_or(false)
+    {
+        panic_with_error!(env, MockTokenError::Unpayable);
+    }
     let from_balance = balance_of(env, from);
     if from_balance < amount {
         panic_with_error!(env, MockTokenError::InsufficientBalance);
@@ -2130,4 +2145,76 @@ fn upgrade_by_admin_replaces_the_executable() {
     advance(&s, MONTH);
     assert!(s.client.charge(&sub_id));
     assert_eq!(s.token.balance(&user), 98 * USDC);
+}
+
+#[test]
+fn charge_skips_and_refunds_when_merchant_payout_transfer_fails() {
+    let (s, mock) = setup_with_mock_token();
+    let (_merchant, payout, plan_id) = merchant_with_plan(&s, 10 * USDC);
+    let user = subscriber(&s, 1_000 * USDC);
+    let sub_id = s.client.subscribe(&user, &plan_id);
+    let allowance_before = s.token.allowance(&user, &s.contract);
+    assert_eq!(allowance_before, 990 * USDC);
+
+    // Simulate trustline limit exceeded on payout: authorized returns true, but transfer rejects
+    mock.set_reject_transfer(&payout);
+    advance(&s, MONTH);
+    assert!(!s.client.charge(&sub_id));
+
+    assert_eq!(
+        last_events(&s),
+        [events::ChargeSkipped {
+            subscriber: user.clone(),
+            sub_id,
+            reason: Symbol::new(&s.env, "payout_failed"),
+        }
+        .to_xdr(&s.env, &s.contract)]
+    );
+
+    // Pulled tokens were refunded to subscriber, status and next_due unchanged
+    let sub = s.client.get_subscription(&sub_id);
+    assert_eq!(sub.status, SubStatus::Active);
+    assert_eq!(sub.next_due, START + MONTH);
+    assert_eq!(s.token.balance(&user), 990 * USDC);
+    assert_eq!(s.token.balance(&s.contract), 0);
+}
+
+#[test]
+fn charge_batch_charges_everyone_else_when_one_merchant_payout_transfer_fails() {
+    let (s, mock) = setup_with_mock_token();
+    let (_merchant_a, payout_a, plan_a) = merchant_with_plan(&s, 10 * USDC);
+    let (_merchant_b, payout_b, plan_b) = merchant_with_plan(&s, 20 * USDC);
+    let (_merchant_c, payout_c, plan_c) = merchant_with_plan(&s, 30 * USDC);
+    let user_a = subscriber(&s, 1_000 * USDC);
+    let user_b = subscriber(&s, 1_000 * USDC);
+    let user_c = subscriber(&s, 1_000 * USDC);
+    let sub_a = s.client.subscribe(&user_a, &plan_a);
+    let sub_b = s.client.subscribe(&user_b, &plan_b);
+    let sub_c = s.client.subscribe(&user_c, &plan_c);
+
+    let payout_a_before = s.token.balance(&payout_a);
+    let payout_c_before = s.token.balance(&payout_c);
+    let fee = |amount: i128| amount * FEE_BPS as i128 / 10_000;
+
+    mock.set_reject_transfer(&payout_b);
+    advance(&s, MONTH);
+    assert_eq!(
+        s.client
+            .charge_batch(&soroban_sdk::vec![&s.env, sub_a, sub_b, sub_c]),
+        soroban_sdk::vec![&s.env, true, false, true]
+    );
+
+    // A and C charged and paid out; B skipped with refund and status untouched
+    assert_eq!(s.token.balance(&user_a), 980 * USDC);
+    assert_eq!(s.token.balance(&user_b), 980 * USDC);
+    assert_eq!(s.token.balance(&user_c), 940 * USDC);
+    assert_eq!(
+        s.token.balance(&payout_a),
+        payout_a_before + 10 * USDC - fee(10 * USDC)
+    );
+    assert_eq!(
+        s.token.balance(&payout_c),
+        payout_c_before + 30 * USDC - fee(30 * USDC)
+    );
+    assert_eq!(s.token.balance(&s.contract), 0);
 }
